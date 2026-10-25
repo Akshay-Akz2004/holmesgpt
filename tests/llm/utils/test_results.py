@@ -7,6 +7,10 @@ from tests.llm.utils.reporting.infra_errors import (
     InfraError,
     classify_result_infra_error,
 )
+from tests.llm.utils.reporting.skill_check import (
+    SkillCheckFailure,
+    classify_skill_check_failure,
+)
 
 
 @dataclass
@@ -70,6 +74,13 @@ class TestStatus:
             if self.status in ("passed", "skipped")
             else classify_result_infra_error(result)
         )
+        # Only fail_reason, not error_message: in live results that falls back
+        # to the full traceback, whose source lines contain the assertion text.
+        self.skill_check_failure: Optional[SkillCheckFailure] = (
+            None
+            if self.status in ("passed", "skipped")
+            else classify_skill_check_failure(result)
+        )
 
     @property
     def passed(self) -> bool:
@@ -120,6 +131,8 @@ class TestStatus:
             return ":white_check_mark:"
         elif self.actual_score == 0 and self.expected_score == 0:
             return ":warning:"
+        elif self.skill_check_failure:
+            return ":x::jigsaw:"
         else:
             return ":x:"
 
@@ -139,6 +152,8 @@ class TestStatus:
             return "[yellow]MOCK FAILURE[/yellow]"
         elif self.passed:
             return "[green]PASS[/green]"
+        elif self.skill_check_failure:
+            return "[red]FAIL (skill check)[/red]"
         else:
             return "[red]FAIL[/red]"
 
@@ -158,5 +173,7 @@ class TestStatus:
             return "MOCK FAILURE"
         elif self.passed:
             return "PASS"
+        elif self.skill_check_failure:
+            return "FAIL (skill check)"
         else:
             return "FAIL"

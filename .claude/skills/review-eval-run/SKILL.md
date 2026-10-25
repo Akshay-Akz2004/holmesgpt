@@ -29,6 +29,8 @@ Requires `BRAINTRUST_API_KEY`. If the run is still in progress, check `gh run vi
 - `passes only on first iteration` — shared setup state decays between iterations (iterations run ~35 min apart on the same cluster). Compare tool outputs of iteration 1 vs 2: if the same query returns data then `None`, the fixture is broken (e.g. Loki flushing idle streams).
 - `no model passes every iteration` — read the failing outputs; flaky setup or an over-strict `expected_output`.
 
+**Skill-check failures**: runs failed by the deterministic skill-suggestion check (`scores.skill_check == 0`), listed with the judge's own verdict and the suggested skill titles. A `correct` judge verdict means the answer was right and only the suggestion was wrong — report these apart from wrong answers, and decide whether the suggested skill was genuinely bad or the eval's `memories_generated: false` is too strict. Experiments from before this score existed have no `skill_check` and show their correctness overwritten to 0.
+
 **Unscored runs / tool errors**: unscored rows are setup failures, timeouts or crashes — count them separately from model failures. High tool-error rates usually mean a broken toolset config or port-forward in the fixture.
 
 **Failures for `--model`**: for every failure, compare OUTPUT against EXPECTED and the tool calls, then classify:

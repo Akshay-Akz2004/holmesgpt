@@ -13,6 +13,14 @@ from tests.llm.utils.reporting.infra_errors import (
     InfraError,
     classify_result_infra_error,
 )
+from tests.llm.utils.reporting.skill_check import (
+    SKILL_CHECK_MARKER,
+    SkillCheckFailure,
+    classify_skill_check_failure,
+    failure_message,
+    judge_verdict,
+    suggested_skill_titles,
+)
 from tests.llm.utils.test_env_vars import (
     BRAINTRUST_API_KEY,
     BRAINTRUST_ORG,
@@ -85,6 +93,15 @@ def get_test_infra_error(test: Dict[str, Any]) -> Optional[InfraError]:
     if test.get("outcome") in ("passed", "skipped"):
         return None
     return classify_result_infra_error(merge_user_properties(test))
+
+
+def get_test_skill_check_failure(test: Dict[str, Any]) -> Optional[SkillCheckFailure]:
+    """Skill-suggestion check that failed this run, if any (still a failure)."""
+    if test.get("outcome") != "failed":
+        return None
+    return classify_skill_check_failure(
+        merge_user_properties(test), failure_message(test.get("call"))
+    )
 
 
 def calculate_success_rate(
@@ -665,6 +682,63 @@ def generate_infra_errors_section(results: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def generate_skill_check_section(results: Dict[str, Any]) -> str:
+    """List runs failed by the skill-suggestion check, with the skill titles."""
+    rows = []
+    has_unrecorded_verdict = False
+    for test in results.get("tests", []):
+        failure = get_test_skill_check_failure(test)
+        if failure is None:
+            continue
+        props = merge_user_properties(test)
+        eval_case = (
+            props.get("clean_test_case_id")
+            or test.get("test_case")
+            or test.get("nodeid", "")
+        )
+        model = props.get("model") or test.get("model", "unknown")
+        verdict = judge_verdict(props)
+        if verdict is None:
+            has_unrecorded_verdict = True
+            judge = "not recorded"
+        else:
+            judge = "correct" if verdict else "wrong"
+        titles = "; ".join(
+            _table_safe(title, 120) for title in suggested_skill_titles(props)
+        )
+        rows.append(
+            (
+                get_model_sort_key(model),
+                eval_case,
+                f"| {SKILL_CHECK_MARKER} | {eval_case} | "
+                f"{get_model_display_name(model)} | {failure.label} | {judge} | "
+                f"{titles or '—'} |",
+            )
+        )
+
+    if not rows:
+        return ""
+
+    lines = [
+        "## Skill-Suggestion Check Failures",
+        "",
+        "These runs failed a deterministic skill-suggestion check, whatever the "
+        "judge decided about the answer. They count as failures in the success "
+        "rates above.",
+        "",
+        "| | Eval | Model | Check | Judge | Suggested skill(s) |",
+        "|---|------|-------|-------|-------|--------------------|",
+    ]
+    lines.extend(row for _, _, row in sorted(rows))
+    if has_unrecorded_verdict:
+        lines.append("")
+        lines.append(
+            "_Judge \"not recorded\": this run predates `fail_reason`, when the "
+            "skill check overwrote the judge's score with 0._"
+        )
+    return "\n".join(lines)
+
+
 def generate_eval_dashboard_heatmap(results: Dict[str, Any]) -> str:
     """Generate a heatmap dashboard showing each eval x model with color-coded pass rates."""
     # Collect data by eval test and model, including test references for Braintrust links
@@ -679,6 +753,7 @@ def generate_eval_dashboard_heatmap(results: Dict[str, Any]) -> str:
                 "setup_failures": 0,
                 "skipped": 0,
                 "infra_errors": 0,
+                "skill_check_failures": 0,
             }
         )
     )
@@ -743,6 +818,8 @@ def generate_eval_dashboard_heatmap(results: Dict[str, Any]) -> str:
                 eval_model_stats[eval_case][model]["mock_failures"] += 1
             if get_test_infra_error(test):
                 eval_model_stats[eval_case][model]["infra_errors"] += 1
+            if get_test_skill_check_failure(test):
+                eval_model_stats[eval_case][model]["skill_check_failures"] += 1
 
             # Add duration if available
             duration = (
@@ -782,6 +859,11 @@ def generate_eval_dashboard_heatmap(results: Dict[str, Any]) -> str:
     )
     lines.append("- ⏱️ Timeout or rate limit error (left out of success rates)")
     lines.append("- ⏭️ Test skipped (e.g., known issue or precondition not met)")
+    lines.append(
+        f"- {SKILL_CHECK_MARKER} Failed the skill-suggestion check (counted as a "
+        f"failure; see Skill-Suggestion Check Failures for the skill and the "
+        f"judge's verdict)"
+    )
     lines.append("")
 
     # Sort evals alphabetically by name
@@ -861,6 +943,8 @@ def generate_eval_dashboard_heatmap(results: Dict[str, Any]) -> str:
                 emoji = get_test_status_emoji(
                     stats, total, passed, skipped, setup_failures
                 )
+                if stats.get("skill_check_failures"):
+                    emoji += SKILL_CHECK_MARKER
 
                 # Create cell with link if available
                 if braintrust_url:
@@ -992,6 +1076,8 @@ def generate_eval_dashboard_heatmap(results: Dict[str, Any]) -> str:
                 emoji = get_test_status_emoji(
                     stats, total, passed, skipped, setup_failures
                 )
+                if stats.get("skill_check_failures"):
+                    emoji += SKILL_CHECK_MARKER
 
                 # Build the cell parts with simplified format
                 if valid_tests > 0:
@@ -1582,6 +1668,11 @@ def main():
     infra_errors_section = generate_infra_errors_section(results)
     if infra_errors_section:
         report_lines.append(infra_errors_section)
+        report_lines.append("")
+
+    skill_check_section = generate_skill_check_section(results)
+    if skill_check_section:
+        report_lines.append(skill_check_section)
         report_lines.append("")
 
     # Model cost comparison table
