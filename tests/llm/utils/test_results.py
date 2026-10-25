@@ -3,6 +3,11 @@
 from dataclasses import dataclass
 from typing import List, Optional
 
+from tests.llm.utils.reporting.infra_errors import (
+    InfraError,
+    classify_result_infra_error,
+)
+
 
 @dataclass
 class TestResult:
@@ -59,6 +64,12 @@ class TestStatus:
         # Throttling flags
         self.failed_due_to_throttling = result.get("failed_due_to_throttling", False)
         self.encountered_throttling = result.get("encountered_throttling", False)
+        # Provider error or timeout: the model never answered.
+        self.infra_error: Optional[InfraError] = (
+            None
+            if self.status in ("passed", "skipped")
+            else classify_result_infra_error(result)
+        )
 
     @property
     def passed(self) -> bool:
@@ -85,6 +96,7 @@ class TestStatus:
             or self.is_mock_failure
             or self.is_setup_failure
             or self.failed_due_to_throttling
+            or self.infra_error
         ):
             return False
         # Known failure (expected to fail)
@@ -98,8 +110,10 @@ class TestStatus:
             return ":no_entry_sign:"
         elif self.is_skipped:
             return ":heavy_minus_sign:"
-        elif self.is_setup_failure:
+        elif self.is_setup_failure or self.infra_error is InfraError.PROVIDER:
             return ":construction:"
+        elif self.infra_error is InfraError.TIMEOUT:
+            return ":hourglass:"
         elif self.is_mock_failure:
             return ":wrench:"
         elif self.passed:
@@ -117,6 +131,10 @@ class TestStatus:
             return "[cyan]SKIPPED[/cyan]"
         elif self.is_setup_failure:
             return "[magenta]SETUP FAIL[/magenta]"
+        elif self.infra_error is InfraError.PROVIDER:
+            return "[magenta]PROVIDER ERROR[/magenta]"
+        elif self.infra_error is InfraError.TIMEOUT:
+            return "[magenta]TIMEOUT[/magenta]"
         elif self.is_mock_failure:
             return "[yellow]MOCK FAILURE[/yellow]"
         elif self.passed:
@@ -132,6 +150,10 @@ class TestStatus:
             return "SKIPPED"
         elif self.is_setup_failure:
             return "SETUP FAILURE"
+        elif self.infra_error is InfraError.PROVIDER:
+            return "PROVIDER ERROR"
+        elif self.infra_error is InfraError.TIMEOUT:
+            return "TIMEOUT"
         elif self.is_mock_failure:
             return "MOCK FAILURE"
         elif self.passed:
