@@ -493,13 +493,13 @@ files = [
 
 [[package]]
 name = "braintrust"
-version = "0.47.0"
+version = "0.45.0"
 description = "SDK for integrating Braintrust"
 optional = false
 python-versions = ">=3.10.0"
 files = [
-    {file = "braintrust-0.47.0-py3-none-any.whl", hash = "sha256:9ee2874c5dabcd03263ea2935df569c4efeb3c7146ef0b140b1ed9b2896b0ff9"},
-    {file = "braintrust-0.47.0.tar.gz", hash = "sha256:cf67cea3a7569343c54a4ce529dd869b07b2a3847e2318dddb3029b99855cc18"},
+    {file = "braintrust-0.45.0-py3-none-any.whl", hash = "sha256:69c32771ab1eea9efccd931cd02a0498f92566de3ecb4d04fc378ff2c3cae8d8"},
+    {file = "braintrust-0.45.0.tar.gz", hash = "sha256:689f7b6b35585b88f847e51ae75db4f664929ef6dd56bb7e7a9cfda3af351a3c"},
 ]
 
 [package.dependencies]
@@ -7523,4 +7523,4 @@ files = [
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.10,<3.14"
-content-hash = "ff10d9bae19e7ca8ee455776615168273853a19b360f6792df2e3e3bec73ee4a"
+content-hash = "047c32a853e44c1e4839ba7f89e37fcd3026ad85dbf9e86fdddffb094c05dac7"
