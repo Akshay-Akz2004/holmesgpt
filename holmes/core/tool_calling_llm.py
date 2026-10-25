@@ -1465,6 +1465,7 @@ class ToolCallingLLM:
             pending_frontend_calls: list[PendingFrontendToolCall] = []
 
             session_prefixes_by_agent = extract_bash_session_prefixes_by_agent(messages)
+            first_tool_result_index = len(messages)
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
                 futures = []
@@ -1585,6 +1586,14 @@ class ToolCallingLLM:
                             event=StreamEvents.TOOL_RESULT,
                             data=tool_result_dict,
                         )
+
+                # Results arrive in completion order, but some models' chat templates
+                # (e.g. Qwen via vLLM) match tool results to calls by position, not id.
+                request_order = {t.id: index for index, t in enumerate(tools_to_call)}  # type: ignore
+                messages[first_tool_result_index:] = sorted(
+                    messages[first_tool_result_index:],
+                    key=lambda m: request_order.get(m.get("tool_call_id"), len(request_order)),
+                )
 
                 # Emit updated token counts after tool results
                 yield self._emit_token_count(

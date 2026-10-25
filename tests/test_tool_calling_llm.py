@@ -800,6 +800,40 @@ class TestParallelToolExecution:
         assert len(start_tools) == 2
         assert len(tool_results) == 2
 
+    @patch(LIMIT_PATCH, side_effect=_make_context_limiter_passthrough)
+    def test_tool_results_keep_request_order_when_first_tool_finishes_last(
+        self, _mock_limit, make_ai, mock_llm
+    ):
+        tool_calls = [_make_mock_tool_call(tool_call_id=f"tc_{i}") for i in range(3)]
+        mock_llm.completion.side_effect = [
+            _make_llm_response(content="Checking", tool_calls=tool_calls),
+            _make_llm_response(content="Done", tool_calls=None),
+        ]
+
+        others_done = threading.Event()
+        finished_ids: List[str] = []
+        lock = threading.Lock()
+
+        def invoke(tool_to_call, **_kwargs):
+            if tool_to_call.id == "tc_0":
+                assert others_done.wait(timeout=5)
+            with lock:
+                finished_ids.append(tool_to_call.id)
+                if {"tc_1", "tc_2"} <= set(finished_ids):
+                    others_done.set()
+            return _make_tool_call_result(tool_call_id=tool_to_call.id)
+
+        ai = make_ai()
+        ai._invoke_llm_tool_call = MagicMock(side_effect=invoke)
+
+        result = ai.call([{"role": "user", "content": "Show all"}])
+
+        assert finished_ids[-1] == "tc_0"
+        tool_message_ids = [
+            m["tool_call_id"] for m in result.messages if m.get("role") == "tool"
+        ]
+        assert tool_message_ids == ["tc_0", "tc_1", "tc_2"]
+
 
 # ---------------------------------------------------------------------------
 # Test 10: Stream approval flow with enable_tool_approval
