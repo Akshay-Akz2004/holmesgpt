@@ -69,15 +69,9 @@ before_test: |
   T_45M=$(ts "minutes=45")
   T_55M=$(ts "minutes=55")
 
-  curl -sf -X DELETE "${ELASTICSEARCH_URL}/${LOGS_INDEX}" \
-    -H "Authorization: ApiKey ${ELASTICSEARCH_API_KEY}" || true
-
   # Quirky-but-realistic schema: event_ts instead of @timestamp, svc as
   # analyzed text with a .keyword subfield, msg holding JSON-encoded payloads.
-  curl -sf -X PUT "${ELASTICSEARCH_URL}/${LOGS_INDEX}?wait_for_active_shards=1" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: ApiKey ${ELASTICSEARCH_API_KEY}" \
-    -d '{"settings":{"number_of_shards":1,"number_of_replicas":0},"mappings":{"dynamic":"strict","properties":{"event_ts":{"type":"date"},"svc":{"type":"text","fields":{"keyword":{"type":"keyword"}}},"env":{"type":"keyword"},"msg":{"type":"text"}}}}' > /dev/null
+  es_ensure_index "$LOGS_INDEX" '{"settings":{"number_of_shards":1,"number_of_replicas":0},"mappings":{"dynamic":"strict","properties":{"event_ts":{"type":"date"},"svc":{"type":"text","fields":{"keyword":{"type":"keyword"}}},"env":{"type":"keyword"},"msg":{"type":"text"}}}}'
 
   BULK_FILE=$(es_temp_file "logs" "271")
   cat > "$BULK_FILE" << BULK_EOF
@@ -97,10 +91,7 @@ before_test: |
   {"event_ts":"${T_5M}","svc":"checkout-gateway","env":"prod","msg":"{\\"level\\":\\"INFO\\",\\"component\\":\\"router\\",\\"detail\\":\\"request completed\\",\\"latency_ms\\":98}"}
   BULK_EOF
   sed 's/^  //' "$BULK_FILE" > "${BULK_FILE}.tmp" && mv "${BULK_FILE}.tmp" "$BULK_FILE"
-  curl -sf -X POST "${ELASTICSEARCH_URL}/${LOGS_INDEX}/_bulk" \
-    -H "Content-Type: application/x-ndjson" \
-    -H "Authorization: ApiKey ${ELASTICSEARCH_API_KEY}" \
-    --data-binary @"$BULK_FILE" > /dev/null
+  es_bulk_load_idempotent "$LOGS_INDEX" "$BULK_FILE" "271"
   rm -f "$BULK_FILE"
   curl -sf -X POST "${ELASTICSEARCH_URL}/${LOGS_INDEX}/_refresh" \
     -H "Authorization: ApiKey ${ELASTICSEARCH_API_KEY}" > /dev/null
