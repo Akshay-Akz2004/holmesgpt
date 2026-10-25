@@ -86,5 +86,25 @@ jobs:
           EXPERIMENT_ID: "master-${{ github.run_id }}"
           CLASSIFIER_MODEL: ${{ vars.CLASSIFIER_MODEL || 'gpt-6.1-sol-medium' }}
           MODELS: ${{ github.event.inputs.models || env.DEFAULT_MASTER_MODELS }}
+          # Keeps the log streaming live while stdout is a pipe into tee.
+          PYTHONUNBUFFERED: "1"
         run: |
-          ./run_benchmarks_local.py --markers regression --models "$MODELS" --iterations 1
+          set -o pipefail
+          ./run_benchmarks_local.py --markers regression --models "$MODELS" --iterations 1 2>&1 | tee "$RUNNER_TEMP/eval-output.log"
+
+      # The Braintrust SDK drops a whole upload batch when the API rejects one
+      # record in it, so results vanish from the experiment while every test
+      # still reports normally. Warn rather than fail: the pytest output and
+      # report still hold every result.
+      - name: Check for dropped Braintrust uploads
+        if: always()
+        shell: bash
+        run: |
+          LOG="$RUNNER_TEMP/eval-output.log"
+          [[ -f "$LOG" ]] || exit 0
+          DROPS=$(grep -c "Dropping batch" "$LOG" || true)
+          if [[ "$DROPS" -gt 0 ]]; then
+            echo "::warning title=Braintrust uploads dropped::Braintrust dropped $DROPS upload batches, so the experiment is missing results. Search the eval step's log for 'Dropping batch' to see the rejected records."
+            echo "> [!WARNING]" >> "$GITHUB_STEP_SUMMARY"
+            echo "> Braintrust dropped $DROPS upload batches; the experiment is missing results." >> "$GITHUB_STEP_SUMMARY"
+          fi
