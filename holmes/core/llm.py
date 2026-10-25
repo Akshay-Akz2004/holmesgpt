@@ -718,9 +718,6 @@ class DefaultLLM(LLM):
                 f"model {model} requires the following environment variables: {model_requirements['missing_keys']}"
             )
 
-    def _get_model_name_variants_for_lookup(self) -> list[str]:
-        return _model_name_variants_for_lookup(self.model)
-
     def get_context_window_size(self) -> int:
         return resolve_context_window(self.model, self.max_context_size)[0]
 
