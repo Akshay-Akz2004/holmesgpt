@@ -106,3 +106,18 @@ def test_registry_reports_limits_per_model_key():
     assert limits["team-gpt4o-fixed"].context_window == 128000
     assert limits["team-gpt4o-fixed"].max_output_tokens == 16384
     assert limits["gpt-4o"].context_window_source == "litellm"
+
+
+def test_registry_skips_only_the_model_that_fails():
+    registry = LLMModelRegistry.__new__(LLMModelRegistry)
+    registry._lock = threading.RLock()
+    registry._llms = {
+        "bad": ModelEntry.model_validate(
+            {"model": "openai/gpt-4o", "custom_args": {"max_context_size": "lots"}}
+        ),
+        "gpt-4o": ModelEntry.model_validate({"model": "openai/gpt-4o"}),
+    }
+
+    limits = registry.get_models_limits()
+
+    assert list(limits) == ["gpt-4o"]

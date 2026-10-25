@@ -1428,13 +1428,22 @@ class LLMModelRegistry:
             return self._llms
 
     def get_models_limits(self) -> dict[str, ModelLimits]:
-        """The limits each loaded model runs with, keyed like ``models``."""
-        return {
-            model_key: resolve_model_limits(
-                entry.model, entry.custom_args, entry.model_extra
-            )
-            for model_key, entry in self.models.items()
-        }
+        """The limits each loaded model runs with, keyed like ``models``.
+
+        A model whose limits can't be resolved (e.g. a non-numeric
+        max_context_size) is left out, so it doesn't hide the others.
+        """
+        limits: dict[str, ModelLimits] = {}
+        for model_key, entry in self.models.items():
+            try:
+                limits[model_key] = resolve_model_limits(
+                    entry.model, entry.custom_args, entry.model_extra
+                )
+            except Exception:
+                logging.warning(
+                    f"Failed to resolve limits for model {model_key}", exc_info=True
+                )
+        return limits
 
     def _parse_models_file(self, path: str) -> dict[str, ModelEntry]:
         models = load_yaml_file(path, raise_error=False, warn_not_found=False)
