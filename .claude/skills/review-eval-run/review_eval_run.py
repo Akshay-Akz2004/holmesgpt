@@ -55,7 +55,23 @@ def model_name(span: Dict[str, Any]) -> str:
 
 
 def passed(span: Dict[str, Any]) -> bool:
-    return (span.get("scores") or {}).get("correctness") == 1
+    scores = span.get("scores") or {}
+    # skill_check fails the run even when the judge accepted the answer.
+    return scores.get("correctness") == 1 and scores.get("skill_check") != 0
+
+
+def print_skill_check_failures(evals: List[Dict[str, Any]]) -> None:
+    failed = [s for s in evals if (s.get("scores") or {}).get("skill_check") == 0]
+    print(f"\n## Skill-check failures: {len(failed)}\n")
+    if failed:
+        print("| Run | Reason | Judge | Suggested skill(s) |\n|---|---|---|---|")
+    for span in failed:
+        metadata = span.get("metadata") or {}
+        judge = "correct" if (span.get("scores") or {}).get("correctness") == 1 else "wrong"
+        titles = "; ".join(
+            str(m.get("title")) for m in metadata.get("suggested_memories") or [] if isinstance(m, dict)
+        )
+        print(f"| {span['span_attributes']['name']} | {metadata.get('fail_reason', '?')} | {judge} | {titles or '-'} |")
 
 
 def print_cache_table(evals: List[Dict[str, Any]], min_cache: float) -> None:
@@ -139,6 +155,7 @@ def main() -> None:
     print(f"# {args.experiment}: {len(evals)} eval runs")
     print_cache_table(evals, args.min_cache)
     print_suspect_tests(evals)
+    print_skill_check_failures(evals)
     print_errors(evals, tools)
     if args.model:
         print_model_failures(evals, tools, args.model)
