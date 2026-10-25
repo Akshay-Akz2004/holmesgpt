@@ -48,6 +48,12 @@ def test_name(span: Dict[str, Any]) -> str:
     return span["span_attributes"]["name"].split("[")[0]
 
 
+def model_name(span: Dict[str, Any]) -> str:
+    # Spans of runs that crashed before scoring have no metadata; the model is
+    # still the second-to-last bracket of the name: test[...][model][variant].
+    return (span.get("metadata") or {}).get("model") or span["span_attributes"]["name"].split("[")[-2].rstrip("]")
+
+
 def passed(span: Dict[str, Any]) -> bool:
     return (span.get("scores") or {}).get("correctness") == 1
 
@@ -57,8 +63,8 @@ def print_cache_table(evals: List[Dict[str, Any]], min_cache: float) -> None:
     cached_tokens: Dict[str, int] = defaultdict(int)
     for span in evals:
         metadata = span.get("metadata") or {}
-        prompt_tokens[metadata.get("model")] += metadata.get("prompt_tokens") or 0
-        cached_tokens[metadata.get("model")] += metadata.get("cached_tokens") or 0
+        prompt_tokens[model_name(span)] += metadata.get("prompt_tokens") or 0
+        cached_tokens[model_name(span)] += metadata.get("cached_tokens") or 0
     print("\n## Prompt caching\n\n| Model | Prompt tokens | Cached | Cache % | Flag |")
     print("|---|---|---|---|---|")
     for model in sorted(prompt_tokens):
@@ -70,7 +76,7 @@ def print_cache_table(evals: List[Dict[str, Any]], min_cache: float) -> None:
 def print_suspect_tests(evals: List[Dict[str, Any]]) -> None:
     runs: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
     for span in sorted(evals, key=lambda s: s["created"]):
-        runs[test_name(span)][(span.get("metadata") or {}).get("model")].append(span)
+        runs[test_name(span)][model_name(span)].append(span)
     print("\n## Suspect tests\n\n| Test | Pattern | Per-model passes |\n|---|---|---|")
     for test, by_model in sorted(runs.items()):
         results = {model: [passed(s) for s in spans] for model, spans in by_model.items()}
@@ -109,7 +115,7 @@ def print_model_failures(evals: List[Dict[str, Any]], tools: List[Dict[str, Any]
     tools_by_root: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for tool in sorted(tools, key=lambda t: t["created"]):
         tools_by_root[tool["root_span_id"]].append(tool)
-    failures = [s for s in evals if (s.get("metadata") or {}).get("model") == model and not passed(s)]
+    failures = [s for s in evals if model_name(s) == model and not passed(s)]
     print(f"\n## Failures for {model}: {len(failures)}")
     for span in failures:
         print(f"\n### {span['span_attributes']['name']} ({span['created']})")
