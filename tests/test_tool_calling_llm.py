@@ -810,27 +810,29 @@ class TestParallelToolExecution:
             _make_llm_response(content="Done", tool_calls=None),
         ]
 
-        others_done = threading.Event()
-        finished_ids: List[str] = []
-        lock = threading.Lock()
+        release_first = threading.Event()
 
         def invoke(tool_to_call, **_kwargs):
             if tool_to_call.id == "tc_0":
-                assert others_done.wait(timeout=5)
-            with lock:
-                finished_ids.append(tool_to_call.id)
-                if {"tc_1", "tc_2"} <= set(finished_ids):
-                    others_done.set()
+                assert release_first.wait(timeout=5)
             return _make_tool_call_result(tool_call_id=tool_to_call.id)
 
         ai = make_ai()
         ai._invoke_llm_tool_call = MagicMock(side_effect=invoke)
 
-        result = ai.call([{"role": "user", "content": "Show all"}])
+        streamed_ids: List[str] = []
+        final_messages: List[Dict[str, Any]] = []
+        for event in ai.call_stream(msgs=[{"role": "user", "content": "Show all"}]):
+            if event.event == StreamEvents.TOOL_RESULT:
+                streamed_ids.append(event.data["tool_call_id"])
+                if {"tc_1", "tc_2"} <= set(streamed_ids):
+                    release_first.set()
+            elif event.event == StreamEvents.ANSWER_END:
+                final_messages = event.data["messages"]
 
-        assert finished_ids[-1] == "tc_0"
+        assert streamed_ids[-1] == "tc_0"
         tool_message_ids = [
-            m["tool_call_id"] for m in result.messages if m.get("role") == "tool"
+            m["tool_call_id"] for m in final_messages if m.get("role") == "tool"
         ]
         assert tool_message_ids == ["tc_0", "tc_1", "tc_2"]
 
