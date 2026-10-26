@@ -46,8 +46,8 @@ ERROR_META_KEYS = (
 # `code` first, then `type`; AWS puts it in `__type` as "namespace#Name".
 _CODE_KEYS = ("provider_code", "code", "type", "__type")
 # `msg` is relay's own error body and `detail` a FastAPI one; both still go
-# through the prose gate. `provider_message` is the provider's and comes first.
-_MESSAGE_KEYS = ("provider_message", "message", "msg", "detail")
+# through the prose gate. `message` is the provider's and comes first.
+_MESSAGE_KEYS = ("message", "msg", "detail")
 
 _CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{1,47}")
 # Anthropic wraps every error in {"type": "error", ...}; that says nothing.

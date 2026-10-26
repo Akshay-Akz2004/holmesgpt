@@ -110,8 +110,8 @@ def test_non_text_is_not_a_message(value):
             ("account_limit_reached", "Your Robusta AI account limit has been reached."),
         ),
         (
-            "litellm.BadGatewayError: OpenAIException - Error code: 502 - {'msg': 'An error occurred while communicating with the AI service.', 'error_code': 5406, 'provider_code': 'bad_gateway', 'provider_message': 'Upstream failed.'}",
-            ("bad_gateway", "Upstream failed."),
+            "litellm.BadGatewayError: OpenAIException - Error code: 502 - {'msg': 'An error occurred while communicating with the AI service.', 'error_code': 5406, 'provider_code': 'bad_gateway'}",
+            ("bad_gateway", "An error occurred while communicating with the AI service."),
         ),
         (
             '{"__type": "com.amazon.coral.availability#ThrottlingException", "message": "Too many requests"}',
@@ -514,6 +514,6 @@ def test_relays_own_msg_and_a_fastapi_detail_are_read_through_the_gate():
 
 def test_the_providers_message_wins_over_relays_own_msg():
     exc = litellm.BadGatewayError(message="OpenAIException - 12345", model="m", llm_provider="openai")
-    exc.body = {"msg": "An error occurred.", "provider_message": "Upstream failed."}
+    exc.body = {"msg": "An error occurred.", "message": "Upstream failed."}
 
     assert ErrorInfo.from_exception(exc).message == "Upstream failed."
