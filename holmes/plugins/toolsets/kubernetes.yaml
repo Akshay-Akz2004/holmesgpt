@@ -470,7 +470,7 @@ toolsets:
           Counts the outputs of jq_expr run against the full List object; null and "" are not counted.
           Start jq_expr with ".items[]" so it runs item by item on any cluster size.
           To count per group, output the group key: ".items[] | .metadata.namespace" returns the
-          total plus "counts_by_value" (count per distinct value, top 50).
+          total plus "counts_by_value" (count per distinct value, top 50; a note says when there are more).
           Returns a JSON object with keys: "total_items_processed", "matches_found" (number of matches),
           "preview" (first 10 results truncated to 200 chars), "counts_by_value" (when matches are
           strings/numbers/booleans and some repeat, else null), "distinct_values", "mode",
@@ -730,17 +730,21 @@ toolsets:
                 .n += 1
                 | if (.preview | length) < 10 then .preview += [$m | if type == "string" then . else tojson end | .[0:200]] else . end
                 | if .scalars and ($m | type | IN("string", "number", "boolean")) then .counts[$m | tojson] += 1 else .scalars = false | .counts = {} end)
+             | (.counts | length) as $distinct
+             | (.scalars and $distinct > 0 and $distinct < .n) as $grouped
              | {total_items_processed: $total_items_processed,
                 matches_found: .n,
                 mode: $mode,
                 preview: .preview,
-                counts_by_value: (if .scalars and (.counts | length) > 0 and (.counts | length) < .n
+                counts_by_value: (if $grouped
                   then .counts | to_entries | sort_by(-.value) | .[:50] | map({value: (.key | fromjson), count: .value})
                   else null end),
-                distinct_values: (if .scalars and .n > 0 then .counts | length else null end),
+                distinct_values: (if .scalars and .n > 0 then $distinct else null end),
                 stderr: (if $stderr == "" then null else $stderr end),
                 scope: $scope,
-                notes: $notes}' \
+                notes: ($notes + (if $grouped and $distinct > 50
+                  then ["counts_by_value shows only the 50 most common of \($distinct) distinct values. To see the rest, narrow the query (namespace, label_selector, or select() in jq_expr)."]
+                  else [] end))}' \
             "$MATCHES_FILE"
 
     # NOTE: this is only possible for probes with a healthz endpoint - we do this to avoid giving the LLM generic

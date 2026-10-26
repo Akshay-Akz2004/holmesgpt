@@ -577,6 +577,35 @@ def test_count_reports_counts_by_value(two_pages_of_configmaps):
     assert result["preview"][0] == "team-a"
 
 
+
+def test_count_notes_when_counts_by_value_is_truncated(kube_stub):
+    # 60 namespaces with 2 ConfigMaps each, plus one with 3 so the top entry is deterministic
+    items = _items("a", "b", "c", namespace="ns-big") + [
+        item for i in range(60) for item in _items("a", "b", namespace=f"ns-{i:02d}")
+    ]
+    kube_stub.serve("/api/v1/pods", _list(items))
+
+    result = _run("kubernetes_count", _params("kubernetes_count", "pods", jq_expr=".items[] | .metadata.namespace"))
+
+    assert result["matches_found"] == 123
+    assert result["distinct_values"] == 61
+    assert len(result["counts_by_value"]) == 50
+    assert result["counts_by_value"][0] == {"value": "ns-big", "count": 3}
+    assert result["notes"] == [
+        "counts_by_value shows only the 50 most common of 61 distinct values. To see the rest, "
+        "narrow the query (namespace, label_selector, or select() in jq_expr)."
+    ]
+
+
+def test_count_has_no_truncation_note_at_50_values(kube_stub):
+    items = [item for i in range(50) for item in _items("a", "b", namespace=f"ns-{i:02d}")]
+    kube_stub.serve("/api/v1/pods", _list(items))
+
+    result = _run("kubernetes_count", _params("kubernetes_count", "pods", jq_expr=".items[] | .metadata.namespace"))
+
+    assert len(result["counts_by_value"]) == 50
+    assert result["notes"] == []
+
 def test_count_omits_counts_by_value_when_all_values_differ(two_pages_of_configmaps):
     result = _run("kubernetes_count", _params("kubernetes_count", "configmaps", jq_expr=".items[] | .metadata.name"))
 
