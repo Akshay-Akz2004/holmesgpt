@@ -13,7 +13,7 @@ import pytest
 
 import holmes.utils.approval_tokens as approval_tokens
 from holmes.core.models import FrontendToolResult, ToolApprovalDecision
-from holmes.core.tool_calling_llm import ToolCallingLLM
+from holmes.core.tool_calling_llm import ToolCallingLLM, _order_tool_results_by_request
 
 
 @pytest.fixture(autouse=True)
@@ -49,6 +49,25 @@ def _tool_result(tool_call_id: str) -> dict:
 
 def _tool_result_ids(messages: list) -> list:
     return [m["tool_call_id"] for m in messages if m.get("role") == "tool"]
+
+
+def test_order_tool_results_by_request_sorts_each_assistant_turn():
+    messages = [
+        {"role": "user", "content": "check"},
+        {"role": "assistant", "content": "", "tool_calls": [_tool_call("a"), _tool_call("b")]},
+        _tool_result("b"),
+        _tool_result("unknown"),
+        _tool_result("a"),
+        {"role": "user", "content": "and now?"},
+        {"role": "assistant", "content": "", "tool_calls": [_tool_call("c"), _tool_call("d")]},
+        _tool_result("d"),
+        _tool_result("c"),
+    ]
+
+    _order_tool_results_by_request(messages)
+
+    assert _tool_result_ids(messages) == ["a", "b", "unknown", "c", "d"]
+    assert messages[5] == {"role": "user", "content": "and now?"}
 
 
 def test_approval_resume_keeps_request_order():

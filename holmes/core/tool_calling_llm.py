@@ -142,22 +142,37 @@ def _merge_choices(response: Any) -> None:
 
 
 def _order_tool_results_by_request(messages: List[Dict[str, Any]]) -> None:
-    """Sort each run of tool results into the order of the assistant's tool_calls.
+    """Put tool results in the same order as the tool calls the model made.
 
     Some chat templates (e.g. Qwen via vLLM) render tool results without their
     tool_call_id, so the model matches results to calls by position.
+
+    Example: an assistant message calls [a, b, c] and is followed by the results
+    [c, a, b]. Afterwards the results read [a, b, c].
     """
-    for i, msg in enumerate(messages):
-        if msg.get("role") != "assistant" or not msg.get("tool_calls"):
-            continue
-        request_order = {tc.get("id"): index for index, tc in enumerate(msg["tool_calls"])}
-        end = i + 1
-        while end < len(messages) and messages[end].get("role") == "tool":
-            end += 1
-        messages[i + 1 : end] = sorted(
-            messages[i + 1 : end],
-            key=lambda m: request_order.get(m.get("tool_call_id"), len(request_order)),
-        )
+    for index, message in enumerate(messages):
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            _order_results_after_assistant_message(messages, index)
+
+
+def _order_results_after_assistant_message(
+    messages: List[Dict[str, Any]], assistant_index: int
+) -> None:
+    requested_ids = [call.get("id") for call in messages[assistant_index]["tool_calls"]]
+
+    # The results are the tool messages directly after the assistant message.
+    start = assistant_index + 1
+    end = start
+    while end < len(messages) and messages[end].get("role") == "tool":
+        end += 1
+
+    def position_in_request(result: Dict[str, Any]) -> int:
+        tool_call_id = result.get("tool_call_id")
+        if tool_call_id in requested_ids:
+            return requested_ids.index(tool_call_id)
+        return len(requested_ids)  # unknown ids go last, in their current order
+
+    messages[start:end] = sorted(messages[start:end], key=position_in_request)
 
 
 # Scope key for the local (caller) cluster in the agent-keyed prefix map.
