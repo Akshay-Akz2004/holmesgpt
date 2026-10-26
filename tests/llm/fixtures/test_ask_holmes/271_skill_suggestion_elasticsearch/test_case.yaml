@@ -51,7 +51,6 @@ tags:
   - logs
   - medium
   - fast
-  - benchmark
 
 setup_timeout: 300
 
