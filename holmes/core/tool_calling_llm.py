@@ -141,6 +141,25 @@ def _merge_choices(response: Any) -> None:
     response.choices = [merged]
 
 
+def _order_tool_results_by_request(messages: List[Dict[str, Any]]) -> None:
+    """Sort each run of tool results into the order of the assistant's tool_calls.
+
+    Some chat templates (e.g. Qwen via vLLM) render tool results without their
+    tool_call_id, so the model matches results to calls by position.
+    """
+    for i, msg in enumerate(messages):
+        if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+            continue
+        request_order = {tc.get("id"): index for index, tc in enumerate(msg["tool_calls"])}
+        end = i + 1
+        while end < len(messages) and messages[end].get("role") == "tool":
+            end += 1
+        messages[i + 1 : end] = sorted(
+            messages[i + 1 : end],
+            key=lambda m: request_order.get(m.get("tool_call_id"), len(request_order)),
+        )
+
+
 # Scope key for the local (caller) cluster in the agent-keyed prefix map.
 _LOCAL_BASH_PREFIX_SCOPE = ""
 
@@ -529,6 +548,7 @@ class ToolCallingLLM:
                 tool_call_with_decision.message_index + 1, tool_call_message
             )
 
+        _order_tool_results_by_request(messages)
         return messages, events
 
     def _resolve_orphaned_tool_calls(
@@ -595,6 +615,7 @@ class ToolCallingLLM:
                     )
                 )
 
+        _order_tool_results_by_request(messages)
         return messages, events
 
     @staticmethod
@@ -679,6 +700,7 @@ class ToolCallingLLM:
                 f"Frontend tool results provided for unknown tool_call_ids (ignored): {unmatched}"
             )
 
+        _order_tool_results_by_request(messages)
         return messages, events
 
     def _get_tools(self) -> list:
@@ -1465,7 +1487,6 @@ class ToolCallingLLM:
             pending_frontend_calls: list[PendingFrontendToolCall] = []
 
             session_prefixes_by_agent = extract_bash_session_prefixes_by_agent(messages)
-            first_tool_result_index = len(messages)
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
                 futures = []
@@ -1587,13 +1608,8 @@ class ToolCallingLLM:
                             data=tool_result_dict,
                         )
 
-                # Results arrive in completion order, but some models' chat templates
-                # (e.g. Qwen via vLLM) match tool results to calls by position, not id.
-                request_order = {t.id: index for index, t in enumerate(tools_to_call)}  # type: ignore
-                messages[first_tool_result_index:] = sorted(
-                    messages[first_tool_result_index:],
-                    key=lambda m: request_order.get(m.get("tool_call_id"), len(request_order)),
-                )
+                # Results arrive in completion order.
+                _order_tool_results_by_request(messages)
 
                 # Emit updated token counts after tool results
                 yield self._emit_token_count(
