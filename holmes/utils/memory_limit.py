@@ -16,13 +16,21 @@ OOM_OUTPUT_MAX_LINES = 10
 
 def get_ulimit_prefix() -> str:
     """
-    Get the ulimit command prefix for memory protection.
+    Get the shell command prefix that applies memory protection to a tool command.
 
-    Returns a shell command prefix that sets virtual memory limit.
-    The '|| true' ensures we continue even if ulimit is not supported.
+    - ``oom_score_adj=1000`` makes the kernel OOM killer pick the tool, not Holmes,
+      when the container as a whole runs out of memory. Raising it needs no privileges.
+    - ``ulimit -d`` (RLIMIT_DATA) caps memory the command actually allocates.
+      ``ulimit -v`` is not used because it also counts address space that Go
+      binaries (kubectl, helm) reserve but never touch, which fails them at random.
+
+    Both steps are best-effort, so the command still runs where they are unsupported.
     """
     memory_limit_kb = TOOL_MEMORY_LIMIT_MB * 1024
-    return f"ulimit -v {memory_limit_kb} 2>/dev/null || true; "
+    return (
+        "{ echo 1000 > /proc/self/oom_score_adj; } 2>/dev/null; "
+        f"ulimit -d {memory_limit_kb} 2>/dev/null || true; "
+    )
 
 
 def _truncate_oom_output(output: str) -> str:
@@ -63,6 +71,7 @@ def check_oom_and_append_hint(output: str, return_code: int) -> str:
     # - "MemoryError" (Python)
     # - "Cannot allocate memory" (various tools)
     # - "out of memory" (Go runtime: "runtime: out of memory", "fatal error: out of memory")
+    # - "memory exhausted" (coreutils, e.g. sort)
     #
     # Note: String-based detection only triggers on non-zero exit codes to avoid
     # false positives when commands succeed but output contains OOM-related text
@@ -73,6 +82,7 @@ def check_oom_and_append_hint(output: str, return_code: int) -> str:
         or "Cannot allocate memory" in output
         or "bad_alloc" in output
         or "out of memory" in output
+        or "memory exhausted" in output
     )
     is_oom = return_code in (137, -9) or (return_code != 0 and has_oom_strings)
 

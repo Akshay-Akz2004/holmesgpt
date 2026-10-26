@@ -72,7 +72,7 @@ def execute_argv_command(argv: List[str], timeout: int) -> BashResult:
     passed verbatim as literal argument bytes and can never spawn a host command.
     Use this whenever any element of ``argv`` is derived from untrusted input.
 
-    Note: the ``ulimit -v`` memory prefix applied by ``execute_bash_command`` is a
+    Note: the memory-protection prefix applied by ``execute_bash_command`` is a
     shell construct and therefore intentionally not applied here. Callers that run
     a thin client such as ``kubectl`` (where the heavy work happens elsewhere and
     the call is bounded by ``timeout``) do not need it.

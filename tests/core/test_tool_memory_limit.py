@@ -14,11 +14,18 @@ from holmes.utils.memory_limit import (
 class TestGetUlimitPrefix:
     """Tests for get_ulimit_prefix function."""
 
-    def test_returns_ulimit_command_with_default(self):
-        """Test ulimit prefix format with default value."""
+    def test_returns_prefix_with_default(self):
+        """Test prefix format with default value."""
         result = get_ulimit_prefix()
         expected_kb = 1024 * TOOL_MEMORY_LIMIT_MB
-        assert result == f"ulimit -v {expected_kb} 2>/dev/null || true; "
+        assert result == (
+            "{ echo 1000 > /proc/self/oom_score_adj; } 2>/dev/null; "
+            f"ulimit -d {expected_kb} 2>/dev/null || true; "
+        )
+
+    def test_does_not_cap_address_space(self):
+        """ulimit -v breaks Go binaries that reserve address space they never use."""
+        assert "ulimit -v" not in get_ulimit_prefix()
 
 
 class TestCheckOomAndAppendHint:
@@ -52,6 +59,7 @@ class TestCheckOomAndAppendHint:
                 "runtime: out of memory: cannot allocate 8388608-byte block",
             ),  # Go runtime OOM
             (2, "fatal error: out of memory"),  # Go fatal error
+            (2, "sort: memory exhausted"),  # coreutils allocation failure
         ],
     )
     def test_hint_prepended_on_oom_indicators(self, return_code: int, output: str):

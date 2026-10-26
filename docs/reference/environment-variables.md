@@ -236,11 +236,11 @@ export TOOL_MAX_ALLOCATED_CONTEXT_WINDOW_TOKENS=50000
 ## Tool Subprocess Memory Limit
 
 ### TOOL_MEMORY_LIMIT_MB
-**Default:** `800` on x86_64, `1500` on ARM / aarch64
+**Default:** `800`
 
-Per-subprocess virtual-memory cap (in MB) applied to every tool command Holmes runs. Implemented by prefixing each command with `ulimit -v <value × 1024>`. When a command exceeds the cap, the kernel kills it (exit `137`) and Holmes prefixes the output with an `[OOM]` hint instructing the LLM to retry with a narrower query.
+Per-subprocess memory cap (in MB) applied to every tool command Holmes runs. Implemented by prefixing each command with `ulimit -d <value × 1024>`, which limits memory the command allocates. Address space that is only reserved, such as the several GB Go binaries like `kubectl` reserve at startup, is not counted. When a command exceeds the cap, its allocation fails and Holmes prefixes the output with an `[OOM]` hint instructing the LLM to retry with a narrower query.
 
-The cap limits **virtual address space**, not resident memory — Go binaries like `kubectl` can reserve hundreds of MB at startup, so set this too low and you will break commands that would otherwise use little RAM. On Kubernetes, keep this comfortably below the pod's `resources.limits.memory`. On macOS the cap is silently ignored (BSD kernel does not enforce `ulimit -v`).
+Each tool subprocess also sets its `oom_score_adj` to `1000`, so if the whole container runs out of memory the kernel kills the tool instead of Holmes. On Kubernetes, keep this value comfortably below the pod's `resources.limits.memory`. On macOS the cap is silently ignored.
 
 See [Tool Execution Safety](../data-sources/tool-execution-safety.md) for the full mechanism, implications, and tuning guidance.
 

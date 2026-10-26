@@ -1,24 +1,25 @@
 # Tool Execution Safety
 
-HolmesGPT runs many of its tools as shell subprocesses — bash commands, `kubectl`, `grep`, `jq`, and similar. To prevent a single runaway command from exhausting all available memory and crashing Holmes itself (or the pod it runs in), every tool subprocess is wrapped with a `ulimit -v` prefix that caps the virtual memory the command is allowed to allocate.
+HolmesGPT runs many of its tools as shell subprocesses — bash commands, `kubectl`, `grep`, `jq`, and similar. To prevent a single runaway command from exhausting all available memory and crashing Holmes itself (or the pod it runs in), every tool subprocess is wrapped with a `ulimit -d` prefix that caps the memory the command is allowed to allocate, and is marked as the first process the kernel kills if the whole container runs out of memory.
 
 This page explains how that mechanism works, how to tune it via the `TOOL_MEMORY_LIMIT_MB` environment variable, and the operational implications you need to know before changing the default.
 
 ## Default Limit
 
-The default value of `TOOL_MEMORY_LIMIT_MB` depends on CPU architecture:
+The default value of `TOOL_MEMORY_LIMIT_MB` is `800` MB on every CPU architecture.
 
-- **x86_64:** `800` MB
-- **ARM / aarch64:** `1500` MB
+The cap uses `ulimit -d` (`RLIMIT_DATA`), which counts memory a command actually allocates (heap and private writable mappings). It does not count address space that is only reserved: Go binaries like `kubectl` and `helm` reserve several GB of address space at startup but use around 100 MB, and they run normally under the cap.
 
-The ARM default is higher because ARM toolchains — especially Go binaries like `kubectl` — reserve more virtual address space at startup.
+## How Holmes Itself Is Protected
+
+The cap applies to each subprocess separately, so several concurrent tool calls can still use more memory together than the container has. Each tool subprocess therefore sets its `oom_score_adj` to `1000`, the highest value. If the container reaches its memory limit, the kernel OOM killer kills a tool subprocess first instead of Holmes. The tool call returns exit code `137` and the `[OOM]` hint below. Raising `oom_score_adj` needs no extra privileges.
 
 ## What Happens When a Command Exceeds the Limit
 
-When a subprocess tries to allocate beyond the cap, the kernel sends `SIGKILL` (exit code `137`). Holmes detects this by checking:
+When a subprocess tries to allocate beyond the cap, the allocation fails and the program usually exits with an out-of-memory error. When the container runs out of memory, the kernel sends `SIGKILL` to the tool (exit code `137`). Holmes detects both by checking:
 
 - Exit code `137` or `-9`, OR
-- Strings like `Killed`, `MemoryError`, `Cannot allocate memory`, `bad_alloc`, or `out of memory` on a non-zero exit.
+- Strings like `Killed`, `MemoryError`, `Cannot allocate memory`, `bad_alloc`, `out of memory`, or `memory exhausted` on a non-zero exit.
 
 When detected, Holmes prefixes the tool output with an `[OOM]` hint. The hint tells the LLM:
 
@@ -37,7 +38,7 @@ Some CLIs fetch the full result set from the server and then filter or format it
 - **`kubectl get ... | grep ...`**, `kubectl get ... -o json | jq ...` — the pipe filters *after* the full object has been fetched and serialized.
 
 !!! warning "Why this confuses users"
-    A user who sees `[OOM]` on `argocd app list -o name` and then runs the **exact same command** manually in a terminal will see it succeed. Their terminal has no `ulimit -v` cap, so the command works — even though it allocated far more memory than the output suggests. This looks like a Holmes bug, but it isn't: the command was always memory-heavy, the cap just exposed it.
+    A user who sees `[OOM]` on `argocd app list -o name` and then runs the **exact same command** manually in a terminal will see it succeed. Their terminal has no `ulimit -d` cap, so the command works — even though it allocated far more memory than the output suggests. This looks like a Holmes bug, but it isn't: the command was always memory-heavy, the cap just exposed it.
 
 ## Implications
 
@@ -58,7 +59,7 @@ If you raise one, raise the other in lockstep.
 
 **macOS silently ignores the cap.**
 
-The BSD kernel does not enforce `ulimit -v`, and the `|| true` fallback hides the failure. Local tests on macOS will not reproduce the OOM behavior you'd see in a Linux container or pod. See [Platform Notes](#platform-notes).
+The macOS kernel does not enforce `ulimit -d` for memory allocated with `mmap`, and the `|| true` fallback hides the failure. Local tests on macOS will not reproduce the OOM behavior you'd see in a Linux container or pod. See [Platform Notes](#platform-notes).
 
 **`[OOM]` is the safety net working, not a bug.**
 
@@ -118,9 +119,9 @@ When you raise `TOOL_MEMORY_LIMIT_MB`, raise the pod's `resources.limits.memory`
 
 ## Platform Notes
 
-- **Linux (containers, pods, most servers):** `ulimit -v` is enforced. The cap behaves as documented.
-- **macOS:** `bash` and `zsh` accept `ulimit -v` but the BSD kernel does not enforce it. The `|| true` fallback swallows the failure, so commands run uncapped. Production behavior must be validated on Linux.
-- **Other shells / minimal containers:** If `ulimit -v` is unavailable, the `|| true` fallback also applies and the cap is effectively disabled. In that case rely on the container's cgroup memory limit instead.
+- **Linux (containers, pods, most servers):** `ulimit -d` and `oom_score_adj` are enforced. The cap behaves as documented.
+- **macOS:** `bash` accepts `ulimit -d` but the kernel does not enforce it for `mmap` allocations, and `/proc/self/oom_score_adj` does not exist. Both steps fail silently, so commands run uncapped. Production behavior must be validated on Linux.
+- **Other shells / minimal containers:** If `ulimit -d` is unavailable, the `|| true` fallback also applies and the cap is effectively disabled. In that case rely on the container's cgroup memory limit instead.
 
 ## See Also
 

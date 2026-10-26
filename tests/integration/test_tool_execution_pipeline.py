@@ -5,8 +5,8 @@ These tests verify the complete tool execution flow with transformers
 in a more realistic environment.
 
 Note: These tests execute real shell commands via YAMLTool, which uses
-ulimit for resource protection. On some systems (e.g., macOS), ulimit -v
-fails and outputs an error to stderr, which gets captured in output.
+a memory-protection prefix. On some systems (e.g., macOS) that prefix may
+fail and output an error to stderr, which gets captured in output.
 These tests are skipped on such systems.
 """
 
@@ -30,14 +30,14 @@ from holmes.core.transformers import (
     TransformerError,
     registry,
 )
+from holmes.utils.memory_limit import get_ulimit_prefix
 from tests.conftest import create_mock_tool_invoke_context
 
 
 def _ulimit_produces_clean_output() -> bool:
     """Check if ulimit commands run without producing stderr output."""
-    # Test the same command pattern used in get_ulimit_prefix()
     result = subprocess.run(
-        "ulimit -v 1048576 2>/dev/null || true",
+        get_ulimit_prefix() + "true",
         shell=True,
         capture_output=True,
         text=True,
