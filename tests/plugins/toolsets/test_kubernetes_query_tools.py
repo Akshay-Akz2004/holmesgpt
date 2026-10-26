@@ -504,7 +504,6 @@ def test_jq_query_length_covers_all_pages(two_pages_of_configmaps):
     result = _run("kubernetes_jq_query", _params("kubernetes_jq_query", "configmaps", jq_expr=".items | length"))
 
     assert result["stderr"] is None
-    assert result["mode"] == "whole_list"
     assert result["results"] == [691]
     assert result["total_items_processed"] == 691
 
@@ -526,28 +525,12 @@ def test_jq_query_whole_list_keeps_list_envelope(two_pages_of_configmaps):
     assert result["results"] == [{"kind": "ConfigMapList", "apiVersion": "v1", "continue": None, "n": 691}]
 
 
-@pytest.mark.parametrize(
-    "expr, mode",
-    [
-        (".items[] | .metadata.name", "per_item"),
-        ("  .items[]? | select(.x)", "per_item"),
-        (".items[].metadata.name", "per_item"),
-        ('.items[].metadata.labels["app"]', "per_item"),
-        (".items[]", "per_item"),
-        (".items[], .kind", "whole_list"),
-        (".items[] as $i | $i.metadata.name", "whole_list"),
-        ("def n: .metadata.name; [.items[] | n] | length", "whole_list"),
-        ("[.items[] | .metadata.name] | length", "whole_list"),
-        (".items[] | .metadata.name, (.items | length)", "whole_list"),
-        (".items[0]", "whole_list"),
-        ("reduce .items[] as $i (0; . + 1)", "whole_list"),
-    ],
-)
-def test_mode_follows_expression_shape(two_pages_of_configmaps, expr, mode):
-    result = _run("kubernetes_jq_query", _params("kubernetes_jq_query", "configmaps", jq_expr=expr))
+def test_expression_with_top_level_comma_runs_once(two_pages_of_configmaps):
+    # per page, '.kind' would be emitted once for each of the two pages
+    result = _run("kubernetes_jq_query", _params("kubernetes_jq_query", "configmaps", jq_expr=".items[], .kind"))
 
-    assert result["stderr"] is None
-    assert result["mode"] == mode
+    assert result["results"].count("ConfigMapList") == 1
+    assert result["matches_found"] == 692
 
 
 def test_whole_list_and_per_item_expressions_agree(two_pages_of_configmaps):
@@ -562,7 +545,6 @@ def test_count_of_list_object_counts_its_items(two_pages_of_configmaps, expr):
     result = _run("kubernetes_count", _params("kubernetes_count", "configmaps", jq_expr=expr))
 
     assert result["matches_found"] == 691
-    assert result["mode"] == "per_item"
     assert result["notes"] == [
         f"jq_expr '{expr}' would count the list object itself, so '.items[]' was used to count the items."
     ]
@@ -573,7 +555,6 @@ def test_count_reports_counts_by_value(two_pages_of_configmaps):
 
     assert result["matches_found"] == 691
     assert result["counts_by_value"] == [{"value": "team-b", "count": 391}, {"value": "team-a", "count": 300}]
-    assert result["distinct_values"] == 2
     assert result["preview"][0] == "team-a"
 
 
@@ -588,7 +569,6 @@ def test_count_notes_when_counts_by_value_is_truncated(kube_stub):
     result = _run("kubernetes_count", _params("kubernetes_count", "pods", jq_expr=".items[] | .metadata.namespace"))
 
     assert result["matches_found"] == 123
-    assert result["distinct_values"] == 61
     assert len(result["counts_by_value"]) == 50
     assert result["counts_by_value"][0] == {"value": "ns-big", "count": 3}
     assert result["notes"] == [
@@ -611,7 +591,6 @@ def test_count_omits_counts_by_value_when_all_values_differ(two_pages_of_configm
 
     assert result["matches_found"] == 691
     assert result["counts_by_value"] is None
-    assert result["distinct_values"] == 691
     assert result["preview"][:2] == ["cm-0", "cm-1"]
 
 
@@ -620,7 +599,6 @@ def test_count_omits_counts_by_value_for_objects(two_pages_of_configmaps):
 
     assert result["matches_found"] == 691
     assert result["counts_by_value"] is None
-    assert result["distinct_values"] is None
     assert json.loads(result["preview"][0]) == {"name": "cm-0", "namespace": "team-a"}
 
 
@@ -675,11 +653,57 @@ def test_whole_list_over_memory_cap_returns_actionable_error(large_pod_list, too
     stderr = result["stderr"]
     assert stderr.startswith(
         "jq_expr is not a per-item expression ('.items[]' or '.items[].path', then '|' or the end, "
-        "with no other '.items'), so it needs all pods in memory at once"
+        "with no other '.items'), so it needs all pods at once"
     )
     assert "larger than the 9 MB this tool can hold (1000 items read so far)" in stderr
     assert "namespace, label_selector or field_selector" in stderr
     assert "counts_by_value" in stderr
+
+
+@pytest.mark.parametrize("tool_name", PAGINATED_TOOLS)
+@pytest.mark.parametrize(
+    "expr, per_item",
+    [
+        (".items[] | .metadata.name", True),
+        ("  .items[]? | select(.x)", True),
+        (".items[].metadata.name", True),
+        ('.items[].metadata.labels["app"]', True),
+        (".items[], .kind", False),
+        (".items[] as $i | $i.metadata.name", False),
+        ("def n: .metadata.name; [.items[] | n] | length", False),
+        ("[.items[] | .metadata.name] | length", False),
+        (".items[] | .metadata.name, (.items | length)", False),
+        (".items[0]", False),
+        ("reduce .items[] as $i (0; . + 1)", False),
+    ],
+)
+def test_only_per_item_expressions_avoid_the_merge(large_pod_list, tool_name, expr, per_item):
+    result = _run(tool_name, _params(tool_name, "pods", jq_expr=expr))
+
+    if per_item:
+        assert result["stderr"] is None
+        assert result["total_items_processed"] == 1000
+    else:
+        assert result["stderr"].startswith("jq_expr is not a per-item expression")
+
+
+def test_jq_query_results_over_cap_return_actionable_error(large_pod_list):
+    result = _run("kubernetes_jq_query", _params("kubernetes_jq_query", "pods", jq_expr=".items[]"))
+
+    assert result["matches_found"] == 0
+    assert result["stderr"].startswith(
+        "The results are larger than the 9 MB this tool can return (1000 pods read so far). "
+        "Output fewer fields in jq_expr"
+    )
+
+
+def test_count_of_full_objects_stays_under_cap(large_pod_list):
+    result = _run("kubernetes_count", _params("kubernetes_count", "pods", jq_expr="."))
+
+    assert result["stderr"] is None
+    assert result["matches_found"] == 1000
+    assert all(len(p) == 200 for p in result["preview"])
+    assert result["preview"][0].startswith('{"metadata":{"name":"p-0"')
 
 
 @pytest.mark.parametrize("tool_name", PAGINATED_TOOLS)

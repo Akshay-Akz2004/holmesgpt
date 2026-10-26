@@ -23,16 +23,13 @@ toolsets:
           If you know the namespace or labels of the resources you need, pass namespace,
           label_selector and/or field_selector so filtering happens server-side; unscoped
           queries can be slow on large clusters.
-          jq_expr runs against the full List object ({"items": [...]}). Expressions of the form
-          ".items[] | ..." or ".items[].path" (with no other ".items") run item by item and work
-          on any cluster size; others (e.g. ".items | length", "group_by", ".items[], .kind") need
-          the whole list in memory and return an error if it is too large - then narrow the
-          query or rewrite it as ".items[] | ...".
+          jq_expr gets the List object. Write it as ".items[] | ..." when you can: that runs item
+          by item on any cluster size. Whole-list expressions (".items | length", "group_by") fail
+          on very large lists; for counts per group use kubernetes_count.
           Returns a JSON object with keys: "total_items_processed", "matches_found",
-          "results" (array of jq outputs), "mode" ("per_item" or "whole_list"), "stderr"
-          (error output or null), "scope" (the resource, namespace and selectors actually
-          queried), and "notes" (e.g. a namespace ignored for a cluster-scoped kind).
-          managedFields and the kubectl last-applied-configuration annotation are removed.
+          "results" (array of jq outputs), "stderr" (error output or null),
+          "scope" (the resource, namespace and selectors actually queried), and
+          "notes" (e.g. a namespace ignored for a cluster-scoped kind).
           The 'kind' parameter must be the plural form of the resource type
           (e.g., "pods" not "pod", "jobs" not "job").
           Do not worry about escaping the jq_expr - it will be done by the system.
@@ -206,25 +203,30 @@ toolsets:
           # (and doesn't use .items again) works item by item, so running it on each page gives
           # the same result as one run over the whole list.
           # Anything else (.items | length, group_by, .) needs every item at once: pages are
-          # spooled to disk and jq runs once over the merged list. The merged list is capped at
-          # 1/12 of the tool memory limit (ulimit -v), since jq needs ~10x the JSON size in memory.
+          # spooled to disk and jq runs once over the merged list.
+          # Spooled data is capped at 1/12 of the tool memory limit (ulimit -v), since jq needs
+          # ~10x the JSON size in memory, and at most 100 MB, since /tmp is a small emptyDir in
+          # the Helm chart and filling it evicts the pod.
           PER_ITEM_RE='^[[:space:]]*\.items\[\]\??(\.[A-Za-z_][A-Za-z0-9_]*\??|\[[^]|]*\]\??)*[[:space:]]*(\||$)'
           if [[ "$JQ_FILTER" =~ $PER_ITEM_RE ]] && [ "$(grep -o '\.items' <<< "$JQ_FILTER" | wc -l)" -eq 1 ]; then
             MODE=per_item
           else
             MODE=whole_list
           fi
+          MAX_BYTES=$((100 * 1024 * 1024))
           MEM_LIMIT_KB=$(ulimit -v)
-          if [[ "$MEM_LIMIT_KB" =~ ^[0-9]+$ ]]; then
-            MAX_MERGE_BYTES=$((MEM_LIMIT_KB * 1024 / 12))
-          else
-            MAX_MERGE_BYTES=$((100 * 1024 * 1024))
+          if [[ "$MEM_LIMIT_KB" =~ ^[0-9]+$ ]] && [ $((MEM_LIMIT_KB * 1024 / 12)) -lt "$MAX_BYTES" ]; then
+            MAX_BYTES=$((MEM_LIMIT_KB * 1024 / 12))
           fi
           too_big_to_merge() {
-            fail "jq_expr is not a per-item expression ('.items[]' or '.items[].path', then '|' or the end, with no other '.items'), so it needs all ${RESOURCE_NAME} in memory at once, and the list is larger than the $((MAX_MERGE_BYTES / 1048576)) MB this tool can hold ($PROCESSED items read so far). Either narrow the query with namespace, label_selector or field_selector, or rewrite jq_expr as '.items[] | ...' so it runs item by item with no size limit. For counts per namespace, node, image, etc. call kubernetes_count with e.g. '.items[] | .metadata.namespace' and read counts_by_value."
+            fail "jq_expr is not a per-item expression ('.items[]' or '.items[].path', then '|' or the end, with no other '.items'), so it needs all ${RESOURCE_NAME} at once, and the list is larger than the $((MAX_BYTES / 1048576)) MB this tool can hold ($PROCESSED items read so far). Either narrow the query with namespace, label_selector or field_selector, or rewrite jq_expr as '.items[] | ...' so it runs item by item. For counts per namespace, node, image, etc. call kubernetes_count with e.g. '.items[] | .metadata.namespace' and read counts_by_value."
+          }
+          results_too_big() {
+            fail "The results are larger than the $((MAX_BYTES / 1048576)) MB this tool can return ($PROCESSED ${RESOURCE_NAME} read so far). Output fewer fields in jq_expr (e.g. '.items[] | .metadata.name') or narrow the query with namespace, label_selector or field_selector."
           }
           # managedFields and the last-applied annotation are large and almost never queried
           SLIM='del(.metadata.managedFields, .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"])'
+          OUTPUT_FILTER='.'
 
           while true; do
             QUERY="${API_PATH}?limit=${LIMIT}${SELECTOR_QUERY}"
@@ -242,15 +244,18 @@ toolsets:
             PROCESSED=$((PROCESSED + ITEMS_COUNT))
 
             if [ "$MODE" = "per_item" ]; then
-              if ! jq -c "(.items |= map(${SLIM})) | ${JQ_FILTER}" "$PAGE_FILE" >> "$MATCHES_FILE" 2>>"$err_file"; then
+              if ! jq -c "(.items |= map(${SLIM})) | (${JQ_FILTER}) | ${OUTPUT_FILTER}" "$PAGE_FILE" >> "$MATCHES_FILE" 2>>"$err_file"; then
                 fail "jq expression failed."
+              fi
+              if [ "$(wc -c < "$MATCHES_FILE")" -gt "$MAX_BYTES" ]; then
+                results_too_big
               fi
             else
               if [ "$LIST_HEADER" = '{}' ]; then
                 LIST_HEADER=$(jq -c '{kind, apiVersion, metadata: (.metadata | del(.continue, .remainingItemCount))}' "$PAGE_FILE")
               fi
               jq -c ".items[] | ${SLIM}" "$PAGE_FILE" >> "$ITEMS_FILE"
-              if [ "$(wc -c < "$ITEMS_FILE")" -gt "$MAX_MERGE_BYTES" ]; then
+              if [ "$(wc -c < "$ITEMS_FILE")" -gt "$MAX_BYTES" ]; then
                 too_big_to_merge
               fi
             fi
@@ -264,13 +269,16 @@ toolsets:
           if [ "$MODE" = "whole_list" ]; then
             touch "$ITEMS_FILE"
             jq -c -n --argjson holmes_list_header "$LIST_HEADER" \
-              "\$holmes_list_header + {items: [inputs]} | ${JQ_FILTER}" "$ITEMS_FILE" > "$MATCHES_FILE" 2>>"$err_file"
+              "\$holmes_list_header + {items: [inputs]} | (${JQ_FILTER}) | ${OUTPUT_FILTER}" "$ITEMS_FILE" > "$MATCHES_FILE" 2>>"$err_file"
             jq_exit=$?
             if [ $jq_exit -ne 0 ]; then
               if grep -q "cannot allocate memory" "$err_file"; then
                 too_big_to_merge
               fi
               fail "jq expression failed."
+            fi
+            if [ "$(wc -c < "$MATCHES_FILE")" -gt "$MAX_BYTES" ]; then
+              results_too_big
             fi
           fi
 
@@ -279,11 +287,10 @@ toolsets:
           # Results go through a file, not --argjson: Linux caps a single argument at 128KB
           jq -s \
             --argjson total_items_processed "$PROCESSED" \
-            --arg mode "$MODE" \
             --arg stderr "$err_content" \
             --argjson scope "$SCOPE" \
             --argjson notes "$NOTES" \
-            '{total_items_processed: $total_items_processed, matches_found: length, mode: $mode, results: ., stderr: (if $stderr == "" then null else $stderr end), scope: $scope, notes: $notes}' \
+            '{total_items_processed: $total_items_processed, matches_found: length, results: ., stderr: (if $stderr == "" then null else $stderr end), scope: $scope, notes: $notes}' \
             "$MATCHES_FILE"
         transformers:
           - name: llm_summarize
@@ -468,13 +475,10 @@ toolsets:
           If you know the namespace or labels of the resources you need, pass namespace,
           label_selector and/or field_selector so filtering happens server-side; unscoped
           queries can be slow on large clusters.
-          Counts the outputs of jq_expr run against the full List object; null and "" are not counted.
-          Write jq_expr as ".items[] | ..." (with no other ".items") so it runs item by item on any cluster size.
-          To count per group, output the group key: ".items[] | .metadata.namespace" returns the
-          total plus "counts_by_value" (count per distinct value, top 50; a note says when there are more).
+          Start jq_expr with ".items[] | ...". To count per group, output the group key
+          (e.g. ".items[] | .metadata.namespace"); "counts_by_value" gives the count per value (top 50).
           Returns a JSON object with keys: "total_items_processed", "matches_found" (number of matches),
-          "preview" (first 10 results truncated to 200 chars), "counts_by_value" (when matches are
-          strings/numbers/booleans and some repeat, else null), "distinct_values", "mode",
+          "preview" (first 10 results truncated to 200 chars), "counts_by_value" (or null),
           "stderr" (error output or null), "scope" (the resource, namespace and selectors actually
           queried), and "notes" (e.g. a namespace ignored for a cluster-scoped kind).
           The 'kind' parameter must be the plural form of the resource type ("pods" not "pod").
@@ -647,25 +651,31 @@ toolsets:
           # (and doesn't use .items again) works item by item, so running it on each page gives
           # the same result as one run over the whole list.
           # Anything else (.items | length, group_by, .) needs every item at once: pages are
-          # spooled to disk and jq runs once over the merged list. The merged list is capped at
-          # 1/12 of the tool memory limit (ulimit -v), since jq needs ~10x the JSON size in memory.
+          # spooled to disk and jq runs once over the merged list.
+          # Spooled data is capped at 1/12 of the tool memory limit (ulimit -v), since jq needs
+          # ~10x the JSON size in memory, and at most 100 MB, since /tmp is a small emptyDir in
+          # the Helm chart and filling it evicts the pod.
           PER_ITEM_RE='^[[:space:]]*\.items\[\]\??(\.[A-Za-z_][A-Za-z0-9_]*\??|\[[^]|]*\]\??)*[[:space:]]*(\||$)'
           if [[ "$JQ_FILTER" =~ $PER_ITEM_RE ]] && [ "$(grep -o '\.items' <<< "$JQ_FILTER" | wc -l)" -eq 1 ]; then
             MODE=per_item
           else
             MODE=whole_list
           fi
+          MAX_BYTES=$((100 * 1024 * 1024))
           MEM_LIMIT_KB=$(ulimit -v)
-          if [[ "$MEM_LIMIT_KB" =~ ^[0-9]+$ ]]; then
-            MAX_MERGE_BYTES=$((MEM_LIMIT_KB * 1024 / 12))
-          else
-            MAX_MERGE_BYTES=$((100 * 1024 * 1024))
+          if [[ "$MEM_LIMIT_KB" =~ ^[0-9]+$ ]] && [ $((MEM_LIMIT_KB * 1024 / 12)) -lt "$MAX_BYTES" ]; then
+            MAX_BYTES=$((MEM_LIMIT_KB * 1024 / 12))
           fi
           too_big_to_merge() {
-            fail "jq_expr is not a per-item expression ('.items[]' or '.items[].path', then '|' or the end, with no other '.items'), so it needs all ${RESOURCE_NAME} in memory at once, and the list is larger than the $((MAX_MERGE_BYTES / 1048576)) MB this tool can hold ($PROCESSED items read so far). Either narrow the query with namespace, label_selector or field_selector, or rewrite jq_expr as '.items[] | ...' so it runs item by item with no size limit. For counts per namespace, node, image, etc. call kubernetes_count with e.g. '.items[] | .metadata.namespace' and read counts_by_value."
+            fail "jq_expr is not a per-item expression ('.items[]' or '.items[].path', then '|' or the end, with no other '.items'), so it needs all ${RESOURCE_NAME} at once, and the list is larger than the $((MAX_BYTES / 1048576)) MB this tool can hold ($PROCESSED items read so far). Either narrow the query with namespace, label_selector or field_selector, or rewrite jq_expr as '.items[] | ...' so it runs item by item. For counts per namespace, node, image, etc. call kubernetes_count with e.g. '.items[] | .metadata.namespace' and read counts_by_value."
+          }
+          results_too_big() {
+            fail "The results are larger than the $((MAX_BYTES / 1048576)) MB this tool can return ($PROCESSED ${RESOURCE_NAME} read so far). Output fewer fields in jq_expr (e.g. '.items[] | .metadata.name') or narrow the query with namespace, label_selector or field_selector."
           }
           # managedFields and the last-applied annotation are large and almost never queried
           SLIM='del(.metadata.managedFields, .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"])'
+          # Counting needs only scalars and a short preview of objects, so keep the results file small
+          OUTPUT_FILTER='if type == "object" or type == "array" then {holmes_preview: (tojson | .[0:200])} else . end'
 
           while true; do
             QUERY="${API_PATH}?limit=${LIMIT}${SELECTOR_QUERY}"
@@ -683,15 +693,18 @@ toolsets:
             PROCESSED=$((PROCESSED + ITEMS_COUNT))
 
             if [ "$MODE" = "per_item" ]; then
-              if ! jq -c "(.items |= map(${SLIM})) | ${JQ_FILTER}" "$PAGE_FILE" >> "$MATCHES_FILE" 2>>"$err_file"; then
+              if ! jq -c "(.items |= map(${SLIM})) | (${JQ_FILTER}) | ${OUTPUT_FILTER}" "$PAGE_FILE" >> "$MATCHES_FILE" 2>>"$err_file"; then
                 fail "jq expression failed."
+              fi
+              if [ "$(wc -c < "$MATCHES_FILE")" -gt "$MAX_BYTES" ]; then
+                results_too_big
               fi
             else
               if [ "$LIST_HEADER" = '{}' ]; then
                 LIST_HEADER=$(jq -c '{kind, apiVersion, metadata: (.metadata | del(.continue, .remainingItemCount))}' "$PAGE_FILE")
               fi
               jq -c ".items[] | ${SLIM}" "$PAGE_FILE" >> "$ITEMS_FILE"
-              if [ "$(wc -c < "$ITEMS_FILE")" -gt "$MAX_MERGE_BYTES" ]; then
+              if [ "$(wc -c < "$ITEMS_FILE")" -gt "$MAX_BYTES" ]; then
                 too_big_to_merge
               fi
             fi
@@ -705,13 +718,16 @@ toolsets:
           if [ "$MODE" = "whole_list" ]; then
             touch "$ITEMS_FILE"
             jq -c -n --argjson holmes_list_header "$LIST_HEADER" \
-              "\$holmes_list_header + {items: [inputs]} | ${JQ_FILTER}" "$ITEMS_FILE" > "$MATCHES_FILE" 2>>"$err_file"
+              "\$holmes_list_header + {items: [inputs]} | (${JQ_FILTER}) | ${OUTPUT_FILTER}" "$ITEMS_FILE" > "$MATCHES_FILE" 2>>"$err_file"
             jq_exit=$?
             if [ $jq_exit -ne 0 ]; then
               if grep -q "cannot allocate memory" "$err_file"; then
                 too_big_to_merge
               fi
               fail "jq expression failed."
+            fi
+            if [ "$(wc -c < "$MATCHES_FILE")" -gt "$MAX_BYTES" ]; then
+              results_too_big
             fi
           fi
 
@@ -722,25 +738,22 @@ toolsets:
           # Streams the file so memory stays bounded by the number of distinct values.
           jq -n \
             --argjson total_items_processed "$PROCESSED" \
-            --arg mode "$MODE" \
             --arg stderr "$err_content" \
             --argjson scope "$SCOPE" \
             --argjson notes "$NOTES" \
             'reduce (inputs | select(. != null and . != "")) as $m
                ({n: 0, preview: [], counts: {}, scalars: true};
                 .n += 1
-                | if (.preview | length) < 10 then .preview += [$m | if type == "string" then . else tojson end | .[0:200]] else . end
-                | if .scalars and ($m | type | IN("string", "number", "boolean")) then .counts[$m | tojson] += 1 else .scalars = false | .counts = {} end)
+                | if (.preview | length) < 10 then .preview += [$m | if type == "object" then .holmes_preview elif type == "string" then .[0:200] else tojson end] else . end
+                | if .scalars and ($m | type != "object") then .counts[$m | tojson] += 1 else .scalars = false | .counts = {} end)
              | (.counts | length) as $distinct
              | (.scalars and $distinct > 0 and $distinct < .n) as $grouped
              | {total_items_processed: $total_items_processed,
                 matches_found: .n,
-                mode: $mode,
                 preview: .preview,
                 counts_by_value: (if $grouped
                   then .counts | to_entries | sort_by(-.value) | .[:50] | map({value: (.key | fromjson), count: .value})
                   else null end),
-                distinct_values: (if .scalars and .n > 0 then $distinct else null end),
                 stderr: (if $stderr == "" then null else $stderr end),
                 scope: $scope,
                 notes: ($notes + (if $grouped and $distinct > 50

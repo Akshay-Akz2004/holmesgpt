@@ -40,7 +40,7 @@ When none are set, the tools query every namespace. Each result includes a `scop
 
 #### Large Clusters
 
-`kubernetes_jq_query` and `kubernetes_count` read the API in pages of 500, so per-item expressions work on any cluster size. A per-item expression has the form `.items[] | ...` or `.items[].path` and doesn't use `.items` anywhere else. Every other expression, such as `.items | length`, `group_by` or `.items[], .kind`, needs every object in memory at once. They are limited to 1/12 of the tool memory limit (`TOOL_MEMORY_LIMIT_MB`, about 66 MB of JSON by default). Above that, the tool returns an error asking HolmesGPT to narrow the query or rewrite it per item.
+`kubernetes_jq_query` and `kubernetes_count` read the API in pages of 500, so per-item expressions work on any cluster size. A per-item expression has the form `.items[] | ...` or `.items[].path` and doesn't use `.items` anywhere else. Every other expression, such as `.items | length`, `group_by` or `.items[], .kind`, needs every object in memory at once. They are limited to 1/12 of the tool memory limit (`TOOL_MEMORY_LIMIT_MB`) and at most 100 MB of JSON, about 66 MB by default. Above that, the tool returns an error asking HolmesGPT to narrow the query or rewrite it per item.
 
 On clusters with thousands of namespaces or pods, unscoped queries are slow. Tell HolmesGPT about your cluster so it scopes its queries with the parameters above, by adding instructions to the Core toolset:
 
