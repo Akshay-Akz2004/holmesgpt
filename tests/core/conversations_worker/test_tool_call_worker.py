@@ -72,6 +72,63 @@ def test_incompressible_result_stays_plain():
     assert p["data"] == noise
 
 
+PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64).decode()
+
+
+def test_images_travel_in_the_payload_as_the_tool_returned_them():
+    result = _ok("Rendered screenshot of panel 1")
+    result.images = [{"data": PNG, "mimeType": "image/png"}]
+    p = serialize_tool_response(result, 0.1)
+    assert p["images"] == [{"data": PNG, "mimeType": "image/png"}]
+    assert p["data"] == "Rendered screenshot of panel 1"
+
+
+def test_a_result_without_images_has_none():
+    assert serialize_tool_response(_ok("hello"), 0.1)["images"] is None
+
+
+def test_only_whole_images_travel():
+    result = _ok("x")
+    result.images = [
+        {"data": PNG, "mimeType": "image/png"},
+        {"data": "", "mimeType": "image/png"},
+        {"data": PNG},
+        {"mimeType": "image/png"},
+        {"data": PNG, "mimeType": "text/plain"},
+        "not a dict",
+        {"data": PNG, "mimeType": "image/jpeg", "extra": "dropped"},
+    ]
+    p = serialize_tool_response(result, 0.1)
+    assert p["images"] == [
+        {"data": PNG, "mimeType": "image/png"},
+        {"data": PNG, "mimeType": "image/jpeg"},
+    ]
+
+
+def test_images_over_the_cap_are_dropped_and_the_text_kept(caplog):
+    result = _ok("small text")
+    result.images = [{"data": "A" * 995, "mimeType": "image/png"}]
+    p = serialize_tool_response(result, 0.1, max_bytes=1000)
+    assert p["status"] == StructuredToolResultStatus.SUCCESS.value
+    assert p["data"] == "small text" and p["images"] is None
+    assert "dropping 1 image" in caplog.text
+
+
+def test_images_within_the_cap_stay_next_to_gzipped_text():
+    result = _ok("x" * 200_000)
+    result.images = [{"data": PNG, "mimeType": "image/png"}]
+    p = serialize_tool_response(result, 0.1)
+    assert p["compressed"] and p["images"] == [{"data": PNG, "mimeType": "image/png"}]
+
+
+def test_an_oversized_text_result_carries_no_images():
+    result = _ok("y" * 2_000_000)
+    result.images = [{"data": PNG, "mimeType": "image/png"}]
+    p = serialize_tool_response(result, 0.1)
+    assert p["status"] == StructuredToolResultStatus.ERROR.value
+    assert p["images"] is None
+
+
 # ---- multi-instance resolution in _execute ----
 
 
@@ -502,6 +559,23 @@ def test_execute_approved_reinvocation_runs_with_user_approved():
     assert resp["status"] == StructuredToolResultStatus.SUCCESS.value
     assert resp["data"] == "ran the command"
     assert tool.invoke.call_args.args[1].user_approved is True
+
+
+def test_execute_keeps_the_images_a_tool_returned():
+    """A Grafana panel rendered on this cluster reaches the caller's
+    Holmes, which cites it like a local one."""
+
+    def render_panel(params, context):
+        return StructuredToolResult(
+            status=StructuredToolResultStatus.SUCCESS,
+            data="Rendered screenshot of panel 1",
+            images=[{"data": PNG, "mimeType": "image/png"}],
+        )
+
+    worker, _ = _approval_worker(render_panel)
+    resp = worker._execute(_approval_row(approved=True))
+    assert resp["status"] == StructuredToolResultStatus.SUCCESS.value
+    assert resp["images"] == [{"data": PNG, "mimeType": "image/png"}]
 
 
 def test_execute_safe_approved_posts_completed_result():

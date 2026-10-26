@@ -76,7 +76,9 @@ def serialize_tool_response(
 ) -> Dict[str, Any]:
     """Serialize a StructuredToolResult into the tool_response payload.
 
-    - Images are dropped (text results only in v1).
+    - Images (base64, as the tool returned them) travel in ``images`` and
+      count against max_bytes; when text and images together exceed it but
+      the text alone fits, the images are dropped and the text kept.
     - Uncompressed data larger than max_bytes (1MB) is rejected with a
       narrow-the-query error.
     - Data over compress_threshold chars is stored gzip+base64 so the DB row,
@@ -86,6 +88,7 @@ def serialize_tool_response(
     """
     data, _is_json = result.stringify_data(compact=False)
     data = data or ""
+    images = _serializable_images(result.images)
 
     payload: Dict[str, Any] = {
         "status": result.status.value
@@ -94,6 +97,7 @@ def serialize_tool_response(
         "data": data,
         "compressed": False,
         "data_gz_b64": None,
+        "images": images or None,
         "error": result.error,
         "return_code": result.return_code,
         "invocation": result.invocation,
@@ -105,11 +109,23 @@ def serialize_tool_response(
     if size > max_bytes:
         payload["status"] = StructuredToolResultStatus.ERROR.value
         payload["data"] = None
+        payload["images"] = None
         payload["error"] = (
             f"result too large ({size} bytes > {max_bytes}); narrow the query "
             "(smaller time range, tighter filters, lower limit)"
         )
         return payload
+
+    images_size = sum(len(image["data"]) for image in images)
+    if images and size + images_size > max_bytes:
+        logging.warning(
+            "remote tool result: dropping %d image(s) (%d bytes) that would take "
+            "the payload over %d bytes; the text is kept",
+            len(images),
+            images_size,
+            max_bytes,
+        )
+        payload["images"] = None
 
     if len(data) > compress_threshold:
         gz_b64 = base64.b64encode(
@@ -121,6 +137,22 @@ def serialize_tool_response(
             payload["data"] = None
 
     return payload
+
+
+def _serializable_images(images: Any) -> list[Dict[str, str]]:
+    """The ``{data, mimeType}`` entries of ``images`` that are whole: a
+    tool's image list is untyped, and the caller side keeps only these."""
+    if not isinstance(images, list):
+        return []
+    return [
+        {"data": image["data"], "mimeType": image["mimeType"]}
+        for image in images
+        if isinstance(image, dict)
+        and isinstance(image.get("data"), str)
+        and image["data"]
+        and isinstance(image.get("mimeType"), str)
+        and image["mimeType"].startswith("image/")
+    ]
 
 
 INTERNAL_KIND_OAUTH_CALLBACK = "oauth_callback"
@@ -444,8 +476,8 @@ class ToolCallWorker:
                 "approval_params": tool_params,
             }
 
-        # 6. Inline result, <=1MB uncompressed, gzip over 100k, no images, no files.
-        result.images = None
+        # 6. Inline result, <=1MB uncompressed, gzip over 100k, images
+        # inline within the cap, no files.
         return serialize_tool_response(result, elapsed)
 
     # ---- internal request kinds ----
