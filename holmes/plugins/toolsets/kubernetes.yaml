@@ -201,12 +201,14 @@ toolsets:
           CONTINUE=""
           LIST_HEADER='{}'
 
-          # An expression starting with '.items[]' (and not using .items again) works item by item,
-          # so running it on each page gives the same result as one run over the whole list.
+          # An expression that starts with '.items[]', optionally a plain path, then '|' or the end
+          # (and doesn't use .items again) works item by item, so running it on each page gives
+          # the same result as one run over the whole list.
           # Anything else (.items | length, group_by, .) needs every item at once: pages are
           # spooled to disk and jq runs once over the merged list. The merged list is capped at
           # 1/12 of the tool memory limit (ulimit -v), since jq needs ~10x the JSON size in memory.
-          if [[ "$JQ_FILTER" =~ ^[[:space:]]*\.items\[\] ]] && [ "$(grep -o '\.items' <<< "$JQ_FILTER" | wc -l)" -eq 1 ]; then
+          PER_ITEM_RE='^[[:space:]]*\.items\[\]\??(\.[A-Za-z_][A-Za-z0-9_]*\??|\[[^]|]*\]\??)*[[:space:]]*(\||$)'
+          if [[ "$JQ_FILTER" =~ $PER_ITEM_RE ]] && [ "$(grep -o '\.items' <<< "$JQ_FILTER" | wc -l)" -eq 1 ]; then
             MODE=per_item
           else
             MODE=whole_list
@@ -640,12 +642,14 @@ toolsets:
           CONTINUE=""
           LIST_HEADER='{}'
 
-          # An expression starting with '.items[]' (and not using .items again) works item by item,
-          # so running it on each page gives the same result as one run over the whole list.
+          # An expression that starts with '.items[]', optionally a plain path, then '|' or the end
+          # (and doesn't use .items again) works item by item, so running it on each page gives
+          # the same result as one run over the whole list.
           # Anything else (.items | length, group_by, .) needs every item at once: pages are
           # spooled to disk and jq runs once over the merged list. The merged list is capped at
           # 1/12 of the tool memory limit (ulimit -v), since jq needs ~10x the JSON size in memory.
-          if [[ "$JQ_FILTER" =~ ^[[:space:]]*\.items\[\] ]] && [ "$(grep -o '\.items' <<< "$JQ_FILTER" | wc -l)" -eq 1 ]; then
+          PER_ITEM_RE='^[[:space:]]*\.items\[\]\??(\.[A-Za-z_][A-Za-z0-9_]*\??|\[[^]|]*\]\??)*[[:space:]]*(\||$)'
+          if [[ "$JQ_FILTER" =~ $PER_ITEM_RE ]] && [ "$(grep -o '\.items' <<< "$JQ_FILTER" | wc -l)" -eq 1 ]; then
             MODE=per_item
           else
             MODE=whole_list

@@ -531,6 +531,12 @@ def test_jq_query_whole_list_keeps_list_envelope(two_pages_of_configmaps):
     [
         (".items[] | .metadata.name", "per_item"),
         ("  .items[]? | select(.x)", "per_item"),
+        (".items[].metadata.name", "per_item"),
+        ('.items[].metadata.labels["app"]', "per_item"),
+        (".items[]", "per_item"),
+        (".items[], .kind", "whole_list"),
+        (".items[] as $i | $i.metadata.name", "whole_list"),
+        ("def n: .metadata.name; [.items[] | n] | length", "whole_list"),
         ("[.items[] | .metadata.name] | length", "whole_list"),
         (".items[] | .metadata.name, (.items | length)", "whole_list"),
         (".items[0]", "whole_list"),
