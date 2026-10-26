@@ -43,7 +43,7 @@ expected_output:
   - "Must report the error code PMT-ERR-7K3M9X in the answer"
   - "Must call the SuggestSkills tool with at least one suggestion"
   - "The SuggestSkills suggestion(s) must capture environment-specific Elasticsearch know-how discovered during the investigation. At least two of the following must appear in the suggestion instructions: (a) timestamps are stored in the event_ts field rather than @timestamp, (b) exact service-name matching requires the svc.keyword subfield (svc is analyzed text), (c) log messages are JSON-encoded strings inside the msg field"
-  - "The SuggestSkills tool call arguments must NOT contain the error code PMT-ERR-7K3M9X, must NOT state the root cause or findings of this specific incident, and must NOT contain timestamps of specific events. Skills must capture reusable data-source knowledge, not incident memories. (This criterion applies only to the SuggestSkills tool call arguments — the error code appearing in other tool outputs or in the final answer is expected.)"
+  - "The SuggestSkills tool call arguments must NOT contain the error code PMT-ERR-7K3M9X, must NOT state the root cause or findings of this specific incident, and must NOT contain timestamps of specific events. Skills must capture reusable data-source knowledge, not incident memories. (This criterion applies only to the SuggestSkills tool call arguments — the error code appearing in other tool outputs or in the final answer is expected.) Mapping the service name the user gave to the name it is logged under in this index (e.g. \"checkout\" is logged as svc \"checkout-gateway\") is reusable data-source knowledge, not an incident finding, and is allowed in the suggestion."
 
 tags:
   - elasticsearch
@@ -51,6 +51,7 @@ tags:
   - logs
   - medium
   - fast
+  - benchmark
 
 setup_timeout: 300
 
