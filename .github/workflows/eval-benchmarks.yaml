@@ -170,6 +170,7 @@ jobs:
           ELASTICSEARCH_API_KEY: ${{ secrets.ELASTICSEARCH_API_KEY }}
           MODEL_LIST_FILE_LOCATION: /tmp/model_list.yaml
           EXPERIMENT_ID: "ci-benchmark-${{ github.run_id }}"
+          CLASSIFIER_MODEL: ${{ vars.CLASSIFIER_MODEL || 'gpt-6.1-sol-medium' }}
           BENCHMARK_ARGS_JSON: ${{ steps.build-command.outputs.args_json }}
         run: |
           # Read the arguments back as an array. Executing "${ARGS[@]}" passes
