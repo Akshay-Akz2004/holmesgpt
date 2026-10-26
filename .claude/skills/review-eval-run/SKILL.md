@@ -10,7 +10,7 @@ Goal: separate real model failures from broken evals, harness bugs and judge mis
 
 ## Step 1: Get the inputs and run the checks
 
-The run's pytest report (`eval_results.json`, in the `eval-results-<run_id>` artifact) is the source of truth for pass/fail, answers, provider errors and skill-check failures. Braintrust (experiment `ci-benchmark-<run_id>`) only adds trace links and tool spans: it drops rows, and the script warns which runs it is missing.
+The run's pytest report (`eval_results.json`, in the `eval-results-<run_id>` artifact) is the source of truth for pass/fail, answers, the judge's rationale (`judge_rationale`), provider errors and skill-check failures. Braintrust (experiment `ci-benchmark-<run_id>`) only adds trace links and tool spans: it drops rows, and the script warns which runs it is missing.
 
 ```bash
 # A run id downloads the artifact (cached under $TMPDIR/review-eval-run/<run_id>/);
@@ -23,7 +23,7 @@ poetry run python .claude/skills/review-eval-run/review_eval_run.py <run_id> \
 
 - **Artifact by hand**: `gh api repos/HolmesGPT/holmesgpt/actions/runs/<run_id>/artifacts` for the id, then `gh api repos/HolmesGPT/holmesgpt/actions/artifacts/<id>/zip > results.zip`. Artifacts expire; a committed report then works as the baseline (`docs/development/evaluations/history/results_*.md`, or `git show <commit>:docs/development/evaluations/fast-benchmark-results.md`) but carries only status and cost per run.
 - **Full job log**: `gh run view <run_id> --json jobs` for the job id, then `gh api repos/HolmesGPT/holmesgpt/actions/jobs/<job_id>/logs > job.log`. The GitHub MCP `get_job_logs` returns only the last 5,000 lines.
-- **Network**: `api.braintrust.dev` (with `BRAINTRUST_API_KEY`), and the blob host GitHub redirects artifact and log downloads to, `productionresultssa<N>.blob.core.windows.net`. `N` differs per run (`sa2`, `sa6`, `sa11` seen), so allow the wildcard; a 403 "Forbidden" from `gh api .../zip` means that shard is blocked.
+- **Network**: `api.braintrust.dev` (with `BRAINTRUST_API_KEY`; logging eval runs also needs `www.braintrust.dev`, where the SDK logs in), and the blob host GitHub redirects artifact and log downloads to, `productionresultssa<N>.blob.core.windows.net`. `N` differs per run (`sa2`, `sa6`, `sa11` seen), so allow the wildcard; a 403 "Forbidden" from `gh api .../zip` means that shard is blocked.
 - If the run is still in progress, check `gh run view <id> --json status,jobs` first.
 
 The script output is a guideline, not a verdict: it only catches known patterns. Always also open the failing traces in Braintrust, read the rendered prompts and tool outputs, and look for anything the script doesn't check.
