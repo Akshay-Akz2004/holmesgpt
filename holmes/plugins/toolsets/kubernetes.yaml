@@ -23,10 +23,11 @@ toolsets:
           If you know the namespace or labels of the resources you need, pass namespace,
           label_selector and/or field_selector so filtering happens server-side; unscoped
           queries can be slow on large clusters.
-          jq_expr runs against the full List object ({"items": [...]}). Expressions that start
-          with ".items[]" run item by item and work on any cluster size; others (e.g.
-          ".items | length", "group_by") need the whole list in memory and return an error
-          if it is too large - then narrow the query or rewrite it to start with ".items[]".
+          jq_expr runs against the full List object ({"items": [...]}). Expressions of the form
+          ".items[] | ..." or ".items[].path" (with no other ".items") run item by item and work
+          on any cluster size; others (e.g. ".items | length", "group_by", ".items[], .kind") need
+          the whole list in memory and return an error if it is too large - then narrow the
+          query or rewrite it as ".items[] | ...".
           Returns a JSON object with keys: "total_items_processed", "matches_found",
           "results" (array of jq outputs), "mode" ("per_item" or "whole_list"), "stderr"
           (error output or null), "scope" (the resource, namespace and selectors actually
@@ -220,7 +221,7 @@ toolsets:
             MAX_MERGE_BYTES=$((100 * 1024 * 1024))
           fi
           too_big_to_merge() {
-            fail "jq_expr does not start with '.items[]', so it needs all ${RESOURCE_NAME} in memory at once, and the list is larger than the $((MAX_MERGE_BYTES / 1048576)) MB this tool can hold ($PROCESSED items read so far). Either narrow the query with namespace, label_selector or field_selector, or rewrite jq_expr to start with '.items[]' so it runs item by item with no size limit. For counts per namespace, node, image, etc. call kubernetes_count with e.g. '.items[] | .metadata.namespace' and read counts_by_value."
+            fail "jq_expr is not a per-item expression ('.items[]' or '.items[].path', then '|' or the end, with no other '.items'), so it needs all ${RESOURCE_NAME} in memory at once, and the list is larger than the $((MAX_MERGE_BYTES / 1048576)) MB this tool can hold ($PROCESSED items read so far). Either narrow the query with namespace, label_selector or field_selector, or rewrite jq_expr as '.items[] | ...' so it runs item by item with no size limit. For counts per namespace, node, image, etc. call kubernetes_count with e.g. '.items[] | .metadata.namespace' and read counts_by_value."
           }
           # managedFields and the last-applied annotation are large and almost never queried
           SLIM='del(.metadata.managedFields, .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"])'
@@ -468,7 +469,7 @@ toolsets:
           label_selector and/or field_selector so filtering happens server-side; unscoped
           queries can be slow on large clusters.
           Counts the outputs of jq_expr run against the full List object; null and "" are not counted.
-          Start jq_expr with ".items[]" so it runs item by item on any cluster size.
+          Write jq_expr as ".items[] | ..." (with no other ".items") so it runs item by item on any cluster size.
           To count per group, output the group key: ".items[] | .metadata.namespace" returns the
           total plus "counts_by_value" (count per distinct value, top 50; a note says when there are more).
           Returns a JSON object with keys: "total_items_processed", "matches_found" (number of matches),
@@ -661,7 +662,7 @@ toolsets:
             MAX_MERGE_BYTES=$((100 * 1024 * 1024))
           fi
           too_big_to_merge() {
-            fail "jq_expr does not start with '.items[]', so it needs all ${RESOURCE_NAME} in memory at once, and the list is larger than the $((MAX_MERGE_BYTES / 1048576)) MB this tool can hold ($PROCESSED items read so far). Either narrow the query with namespace, label_selector or field_selector, or rewrite jq_expr to start with '.items[]' so it runs item by item with no size limit. For counts per namespace, node, image, etc. call kubernetes_count with e.g. '.items[] | .metadata.namespace' and read counts_by_value."
+            fail "jq_expr is not a per-item expression ('.items[]' or '.items[].path', then '|' or the end, with no other '.items'), so it needs all ${RESOURCE_NAME} in memory at once, and the list is larger than the $((MAX_MERGE_BYTES / 1048576)) MB this tool can hold ($PROCESSED items read so far). Either narrow the query with namespace, label_selector or field_selector, or rewrite jq_expr as '.items[] | ...' so it runs item by item with no size limit. For counts per namespace, node, image, etc. call kubernetes_count with e.g. '.items[] | .metadata.namespace' and read counts_by_value."
           }
           # managedFields and the last-applied annotation are large and almost never queried
           SLIM='del(.metadata.managedFields, .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"])'

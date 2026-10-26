@@ -673,7 +673,10 @@ def test_whole_list_over_memory_cap_returns_actionable_error(large_pod_list, too
 
     assert result["matches_found"] == 0
     stderr = result["stderr"]
-    assert "jq_expr does not start with '.items[]', so it needs all pods in memory at once" in stderr
+    assert stderr.startswith(
+        "jq_expr is not a per-item expression ('.items[]' or '.items[].path', then '|' or the end, "
+        "with no other '.items'), so it needs all pods in memory at once"
+    )
     assert "larger than the 9 MB this tool can hold (1000 items read so far)" in stderr
     assert "namespace, label_selector or field_selector" in stderr
     assert "counts_by_value" in stderr
