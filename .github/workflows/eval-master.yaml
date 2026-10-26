@@ -13,6 +13,12 @@ on:
 
 env:
   DEFAULT_MASTER_MODELS: 'opus-4.6'
+  # Tool commands run under `ulimit -v`, which caps virtual address space,
+  # so Go binaries (kubectl, helm) can crash at startup before using any
+  # memory. Under parallel eval load the 800 MB default crashed ~20% of
+  # kubectl calls and 1200 MB crashed every one; 1536 MB crashed none in
+  # 1,600 runs. ROB-819 replaces the ulimit itself.
+  TOOL_MEMORY_LIMIT_MB: "1536"
 
 jobs:
   run-master-baseline:
