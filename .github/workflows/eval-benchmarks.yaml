@@ -50,6 +50,12 @@ env:
   # Default models for benchmarks - single source of truth
   # NOTE: Keep workflow_dispatch default in sync with this for UI display
   DEFAULT_BENCHMARK_MODELS: 'opus-5.5-medium,sonnet-5.5-medium,gpt-6.1-sol-high,gpt-5.5,haiku-4.5,gemini-3.1-pro-preview,deepseek-v4-pro,kimi-k3,glm-5.3'
+  # Tool commands run under `ulimit -v`, which caps virtual address space,
+  # so Go binaries (kubectl, helm) can crash at startup before using any
+  # memory. Under parallel eval load the 800 MB default crashed ~20% of
+  # kubectl calls and 1200 MB crashed every one; 1536 MB crashed none in
+  # 1,600 runs. ROB-819 replaces the ulimit itself.
+  TOOL_MEMORY_LIMIT_MB: "1536"
 
 jobs:
   run-benchmarks:
