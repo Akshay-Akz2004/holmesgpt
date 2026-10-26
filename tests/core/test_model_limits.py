@@ -71,6 +71,12 @@ def test_max_completion_tokens_counts_as_config():
     assert limits.context_window_source == "default"
 
 
+def test_zero_max_tokens_is_reported_as_config():
+    # completion() sends an explicit 0, so the status must report it too.
+    limits = resolve_model_limits("litellm_proxy/team-gpt4o", args={"max_tokens": 0})
+    assert (limits.max_output_tokens, limits.max_output_tokens_source) == (0, "config")
+
+
 def test_null_max_tokens_is_not_an_override():
     limits = resolve_model_limits("litellm_proxy/team-gpt4o", args={"max_tokens": None})
     assert limits.max_output_tokens_source == "default"

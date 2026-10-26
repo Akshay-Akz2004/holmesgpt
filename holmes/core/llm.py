@@ -396,8 +396,12 @@ def resolve_model_limits(
     max_context_size = (custom_args or {}).get("max_context_size")
     context_window, context_source = resolve_context_window(model, max_context_size)
     args = args or {}
-    explicit_output = args.get("max_completion_tokens") or args.get("max_tokens")
-    if explicit_output:
+    # Same precedence as completion(): None means unset, any other value
+    # (even 0) is sent as is.
+    explicit_output = args.get("max_completion_tokens")
+    if explicit_output is None:
+        explicit_output = args.get("max_tokens")
+    if explicit_output is not None:
         max_output: int = explicit_output
         output_source: LimitSource = "config"
     else:
@@ -1433,8 +1437,11 @@ class LLMModelRegistry:
         A model whose limits can't be resolved (e.g. a non-numeric
         max_context_size) is left out, so it doesn't hide the others.
         """
+        # Snapshot under the lock: a Robusta resync can add models mid-iteration.
+        with self._lock:
+            entries = list(self._llms.items())
         limits: dict[str, ModelLimits] = {}
-        for model_key, entry in self.models.items():
+        for model_key, entry in entries:
             try:
                 limits[model_key] = resolve_model_limits(
                     entry.model, entry.custom_args, entry.model_extra
