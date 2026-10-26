@@ -23,10 +23,15 @@ toolsets:
           If you know the namespace or labels of the resources you need, pass namespace,
           label_selector and/or field_selector so filtering happens server-side; unscoped
           queries can be slow on large clusters.
+          jq_expr runs against the full List object ({"items": [...]}). Expressions that start
+          with ".items[]" run item by item and work on any cluster size; others (e.g.
+          ".items | length", "group_by") need the whole list in memory and return an error
+          if it is too large - then narrow the query or rewrite it to start with ".items[]".
           Returns a JSON object with keys: "total_items_processed", "matches_found",
-          "results" (array of matching resources), "stderr" (error output or null),
-          "scope" (the resource, namespace and selectors actually queried), and
-          "notes" (e.g. a namespace ignored for a cluster-scoped kind).
+          "results" (array of jq outputs), "mode" ("per_item" or "whole_list"), "stderr"
+          (error output or null), "scope" (the resource, namespace and selectors actually
+          queried), and "notes" (e.g. a namespace ignored for a cluster-scoped kind).
+          managedFields and the kubectl last-applied-configuration annotation are removed.
           The 'kind' parameter must be the plural form of the resource type
           (e.g., "pods" not "pod", "jobs" not "job").
           Do not worry about escaping the jq_expr - it will be done by the system.
@@ -57,17 +62,24 @@ toolsets:
           SEL_NAMESPACE={{ namespace if namespace is string else "" }}
           SEL_LABELS={{ label_selector }}
           SEL_FIELDS={{ field_selector }}
-          # Strict tool calls send null for unset optional params, which renders as 'None'
-          [ "$SEL_NAMESPACE" = "None" ] && SEL_NAMESPACE=""
-          [ "$SEL_LABELS" = "None" ] && SEL_LABELS=""
-          [ "$SEL_FIELDS" = "None" ] && SEL_FIELDS=""
+          # Strict tool calls send null for unset optional params, which renders as 'None';
+          # some models also pass the string "null"
+          is_unset() { [ -z "$1" ] || [ "$1" = "None" ] || [ "$1" = "null" ]; }
+          is_unset "$SEL_NAMESPACE" && SEL_NAMESPACE=""
+          is_unset "$SEL_LABELS" && SEL_LABELS=""
+          is_unset "$SEL_FIELDS" && SEL_FIELDS=""
 
           # Collapse multi-line jq expressions (LLMs sometimes write multi-line jq)
           # Note: use $'\n' syntax instead of '\n' because Jinja2 interprets \n as literal newlines
           JQ_FILTER={{ jq_expr }}
           JQ_FILTER=$(printf '%s' "$JQ_FILTER" | tr $'\n\r' '  ')
 
-          err_file=$(mktemp)
+          WORK_DIR=$(mktemp -d)
+          trap 'rm -rf "$WORK_DIR"' EXIT
+          err_file="$WORK_DIR/stderr"
+          MATCHES_FILE="$WORK_DIR/matches.jsonl"
+          ITEMS_FILE="$WORK_DIR/items.jsonl"
+          : > "$MATCHES_FILE"
           PROCESSED=0
           NOTES='[]'
           SCOPE='null'
@@ -82,7 +94,6 @@ toolsets:
 
           fail() {
             err_content=$(cat "$err_file" 2>/dev/null)
-            rm -f "$err_file"
             jq -n --arg stderr "$1 $err_content" --argjson total "$PROCESSED" --argjson notes "$NOTES" --argjson scope "$SCOPE" \
               '{total_items_processed: $total, matches_found: 0, results: [], stderr: $stderr, scope: $scope, notes: $notes}'
             exit 0
@@ -188,8 +199,29 @@ toolsets:
           # Process resources in chunks using API pagination
           LIMIT=500
           CONTINUE=""
-          TOTAL_MATCHES=0
-          ALL_MATCHES=""
+          LIST_HEADER='{}'
+
+          # An expression starting with '.items[]' (and not using .items again) works item by item,
+          # so running it on each page gives the same result as one run over the whole list.
+          # Anything else (.items | length, group_by, .) needs every item at once: pages are
+          # spooled to disk and jq runs once over the merged list. The merged list is capped at
+          # 1/12 of the tool memory limit (ulimit -v), since jq needs ~10x the JSON size in memory.
+          if [[ "$JQ_FILTER" =~ ^[[:space:]]*\.items\[\] ]] && [ "$(grep -o '\.items' <<< "$JQ_FILTER" | wc -l)" -eq 1 ]; then
+            MODE=per_item
+          else
+            MODE=whole_list
+          fi
+          MEM_LIMIT_KB=$(ulimit -v)
+          if [[ "$MEM_LIMIT_KB" =~ ^[0-9]+$ ]]; then
+            MAX_MERGE_BYTES=$((MEM_LIMIT_KB * 1024 / 12))
+          else
+            MAX_MERGE_BYTES=$((100 * 1024 * 1024))
+          fi
+          too_big_to_merge() {
+            fail "jq_expr does not start with '.items[]', so it needs all ${RESOURCE_NAME} in memory at once, and the list is larger than the $((MAX_MERGE_BYTES / 1048576)) MB this tool can hold ($PROCESSED items read so far). Either narrow the query with namespace, label_selector or field_selector, or rewrite jq_expr to start with '.items[]' so it runs item by item with no size limit. For counts per namespace, node, image, etc. call kubernetes_count with e.g. '.items[] | .metadata.namespace' and read counts_by_value."
+          }
+          # managedFields and the last-applied annotation are large and almost never queried
+          SLIM='del(.metadata.managedFields, .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"])'
 
           while true; do
             QUERY="${API_PATH}?limit=${LIMIT}${SELECTOR_QUERY}"
@@ -198,53 +230,58 @@ toolsets:
               QUERY="${QUERY}&continue=$(uri_encode "$CONTINUE")"
             fi
 
-            OUTPUT=$(kubectl get --raw "$QUERY" 2>>"$err_file")
-            exit_code=$?
-
-            if [ $exit_code -ne 0 ]; then
+            PAGE_FILE="$WORK_DIR/page.json"
+            if ! kubectl get --raw "$QUERY" > "$PAGE_FILE" 2>>"$err_file"; then
               fail "kubectl get --raw failed for $QUERY."
             fi
 
-            ITEMS_COUNT=$(echo "$OUTPUT" | jq '.items | length')
+            ITEMS_COUNT=$(jq '.items | length' "$PAGE_FILE")
+            PROCESSED=$((PROCESSED + ITEMS_COUNT))
 
-            MATCHES=$(echo "$OUTPUT" | jq -c "$JQ_FILTER" 2>>"$err_file")
-            jq_exit=$?
-            if [ $jq_exit -ne 0 ]; then
-              fail "jq expression failed."
-            fi
-
-            if [ "$ITEMS_COUNT" -gt 0 ]; then
-              if [ -n "$MATCHES" ]; then
-                if [ -z "$ALL_MATCHES" ]; then
-                  ALL_MATCHES="$MATCHES"
-                else
-                  ALL_MATCHES="$ALL_MATCHES"$'\n'"$MATCHES"
-                fi
-                MATCH_COUNT=$(echo "$MATCHES" | grep -c . || true)
-                TOTAL_MATCHES=$((TOTAL_MATCHES + MATCH_COUNT))
+            if [ "$MODE" = "per_item" ]; then
+              if ! jq -c "(.items |= map(${SLIM})) | ${JQ_FILTER}" "$PAGE_FILE" >> "$MATCHES_FILE" 2>>"$err_file"; then
+                fail "jq expression failed."
               fi
-              PROCESSED=$((PROCESSED + ITEMS_COUNT))
+            else
+              if [ "$LIST_HEADER" = '{}' ]; then
+                LIST_HEADER=$(jq -c '{kind, apiVersion, metadata: (.metadata | del(.continue, .remainingItemCount))}' "$PAGE_FILE")
+              fi
+              jq -c ".items[] | ${SLIM}" "$PAGE_FILE" >> "$ITEMS_FILE"
+              if [ "$(wc -c < "$ITEMS_FILE")" -gt "$MAX_MERGE_BYTES" ]; then
+                too_big_to_merge
+              fi
             fi
 
-            CONTINUE=$(echo "$OUTPUT" | jq -r '.metadata.continue // empty')
-
+            CONTINUE=$(jq -r '.metadata.continue // empty' "$PAGE_FILE")
             if [ -z "$CONTINUE" ]; then
               break
             fi
           done
 
-          err_content=$(cat "$err_file" 2>/dev/null)
-          rm -f "$err_file"
+          if [ "$MODE" = "whole_list" ]; then
+            touch "$ITEMS_FILE"
+            jq -c -n --argjson holmes_list_header "$LIST_HEADER" \
+              "\$holmes_list_header + {items: [inputs]} | ${JQ_FILTER}" "$ITEMS_FILE" > "$MATCHES_FILE" 2>>"$err_file"
+            jq_exit=$?
+            if [ $jq_exit -ne 0 ]; then
+              if grep -q "cannot allocate memory" "$err_file"; then
+                too_big_to_merge
+              fi
+              fail "jq expression failed."
+            fi
+          fi
 
-          # Output results as a JSON object with metadata. Results go through stdin, not --argjson:
-          # Linux caps a single argument at 128KB, so larger results failed with "Argument list too long".
-          printf '%s\n' "$ALL_MATCHES" | jq -s \
+          err_content=$(cat "$err_file" 2>/dev/null)
+
+          # Results go through a file, not --argjson: Linux caps a single argument at 128KB
+          jq -s \
             --argjson total_items_processed "$PROCESSED" \
-            --argjson matches_found "$TOTAL_MATCHES" \
+            --arg mode "$MODE" \
             --arg stderr "$err_content" \
             --argjson scope "$SCOPE" \
             --argjson notes "$NOTES" \
-            '{total_items_processed: $total_items_processed, matches_found: $matches_found, results: ., stderr: (if $stderr == "" then null else $stderr end), scope: $scope, notes: $notes}'
+            '{total_items_processed: $total_items_processed, matches_found: length, mode: $mode, results: ., stderr: (if $stderr == "" then null else $stderr end), scope: $scope, notes: $notes}' \
+            "$MATCHES_FILE"
         transformers:
           - name: llm_summarize
             config:
@@ -311,11 +348,13 @@ toolsets:
           SEL_LABELS={{ label_selector }}
           SEL_FIELDS={{ field_selector }}
           FILTER_PATTERN={{ filter_pattern }}
-          # Strict tool calls send null for unset optional params, which renders as 'None'
-          [ "$SEL_NAMESPACE" = "None" ] && SEL_NAMESPACE=""
-          [ "$SEL_LABELS" = "None" ] && SEL_LABELS=""
-          [ "$SEL_FIELDS" = "None" ] && SEL_FIELDS=""
-          [ "$FILTER_PATTERN" = "None" ] && FILTER_PATTERN=""
+          # Strict tool calls send null for unset optional params, which renders as 'None';
+          # some models also pass the string "null"
+          is_unset() { [ -z "$1" ] || [ "$1" = "None" ] || [ "$1" = "null" ]; }
+          is_unset "$SEL_NAMESPACE" && SEL_NAMESPACE=""
+          is_unset "$SEL_LABELS" && SEL_LABELS=""
+          is_unset "$SEL_FIELDS" && SEL_FIELDS=""
+          is_unset "$FILTER_PATTERN" && FILTER_PATTERN=""
 
           # kubectl ignores -n for cluster-scoped kinds; say so instead of reporting a namespace that wasn't applied
           NOTES='[]'
@@ -426,10 +465,15 @@ toolsets:
           If you know the namespace or labels of the resources you need, pass namespace,
           label_selector and/or field_selector so filtering happens server-side; unscoped
           queries can be slow on large clusters.
+          Counts the outputs of jq_expr run against the full List object; null and "" are not counted.
+          Start jq_expr with ".items[]" so it runs item by item on any cluster size.
+          To count per group, output the group key: ".items[] | .metadata.namespace" returns the
+          total plus "counts_by_value" (count per distinct value, top 50).
           Returns a JSON object with keys: "total_items_processed", "matches_found" (number of matches),
-          "preview" (first 10 results truncated to 200 chars), "stderr" (error output or null),
-          "scope" (the resource, namespace and selectors actually queried), and
-          "notes" (e.g. a namespace ignored for a cluster-scoped kind).
+          "preview" (first 10 results truncated to 200 chars), "counts_by_value" (when matches are
+          strings/numbers/booleans and some repeat, else null), "distinct_values", "mode",
+          "stderr" (error output or null), "scope" (the resource, namespace and selectors actually
+          queried), and "notes" (e.g. a namespace ignored for a cluster-scoped kind).
           The 'kind' parameter must be the plural form of the resource type ("pods" not "pod").
           Use select() to filter objects before extracting properties; do not worry about escaping
           the jq_expr - it will be done by the system.
@@ -458,13 +502,23 @@ toolsets:
           SEL_NAMESPACE={{ namespace if namespace is string else "" }}
           SEL_LABELS={{ label_selector }}
           SEL_FIELDS={{ field_selector }}
-          # Strict tool calls send null for unset optional params, which renders as 'None'
-          [ "$SEL_NAMESPACE" = "None" ] && SEL_NAMESPACE=""
-          [ "$SEL_LABELS" = "None" ] && SEL_LABELS=""
-          [ "$SEL_FIELDS" = "None" ] && SEL_FIELDS=""
+          # Strict tool calls send null for unset optional params, which renders as 'None';
+          # some models also pass the string "null"
+          is_unset() { [ -z "$1" ] || [ "$1" = "None" ] || [ "$1" = "null" ]; }
+          is_unset "$SEL_NAMESPACE" && SEL_NAMESPACE=""
+          is_unset "$SEL_LABELS" && SEL_LABELS=""
+          is_unset "$SEL_FIELDS" && SEL_FIELDS=""
 
-          err_file=$(mktemp)
-          TOTAL_PROCESSED=0
+          JQ_FILTER={{ jq_expr }}
+          JQ_FILTER=$(printf '%s' "$JQ_FILTER" | tr $'\n\r' '  ')
+
+          WORK_DIR=$(mktemp -d)
+          trap 'rm -rf "$WORK_DIR"' EXIT
+          err_file="$WORK_DIR/stderr"
+          MATCHES_FILE="$WORK_DIR/matches.jsonl"
+          ITEMS_FILE="$WORK_DIR/items.jsonl"
+          : > "$MATCHES_FILE"
+          PROCESSED=0
           NOTES='[]'
           SCOPE='null'
 
@@ -472,15 +526,20 @@ toolsets:
             NOTES=$(jq -c --arg note "$1" '. + [$note]' <<< "$NOTES")
           }
 
+          # '.' or '.items' would count the List object itself (1) rather than its items
+          if [[ "$JQ_FILTER" =~ ^[[:space:]]*(\.|\.items)?[[:space:]]*$ ]]; then
+            add_note "jq_expr '${JQ_FILTER}' would count the list object itself, so '.items[]' was used to count the items."
+            JQ_FILTER='.items[]'
+          fi
+
           uri_encode() {
             jq -rn --arg v "$1" '$v|@uri'
           }
 
           fail() {
             err_content=$(cat "$err_file" 2>/dev/null)
-            rm -f "$err_file"
-            jq -n --arg stderr "$1 $err_content" --argjson total "$TOTAL_PROCESSED" --argjson notes "$NOTES" --argjson scope "$SCOPE" \
-              '{total_items_processed: $total, matches_found: 0, preview: [], stderr: $stderr, scope: $scope, notes: $notes}'
+            jq -n --arg stderr "$1 $err_content" --argjson total "$PROCESSED" --argjson notes "$NOTES" --argjson scope "$SCOPE" \
+              '{total_items_processed: $total, matches_found: 0, preview: [], counts_by_value: null, stderr: $stderr, scope: $scope, notes: $notes}'
             exit 0
           }
 
@@ -579,7 +638,29 @@ toolsets:
           # Process resources in chunks using API pagination
           LIMIT=500
           CONTINUE=""
-          ALL_MATCHES=""
+          LIST_HEADER='{}'
+
+          # An expression starting with '.items[]' (and not using .items again) works item by item,
+          # so running it on each page gives the same result as one run over the whole list.
+          # Anything else (.items | length, group_by, .) needs every item at once: pages are
+          # spooled to disk and jq runs once over the merged list. The merged list is capped at
+          # 1/12 of the tool memory limit (ulimit -v), since jq needs ~10x the JSON size in memory.
+          if [[ "$JQ_FILTER" =~ ^[[:space:]]*\.items\[\] ]] && [ "$(grep -o '\.items' <<< "$JQ_FILTER" | wc -l)" -eq 1 ]; then
+            MODE=per_item
+          else
+            MODE=whole_list
+          fi
+          MEM_LIMIT_KB=$(ulimit -v)
+          if [[ "$MEM_LIMIT_KB" =~ ^[0-9]+$ ]]; then
+            MAX_MERGE_BYTES=$((MEM_LIMIT_KB * 1024 / 12))
+          else
+            MAX_MERGE_BYTES=$((100 * 1024 * 1024))
+          fi
+          too_big_to_merge() {
+            fail "jq_expr does not start with '.items[]', so it needs all ${RESOURCE_NAME} in memory at once, and the list is larger than the $((MAX_MERGE_BYTES / 1048576)) MB this tool can hold ($PROCESSED items read so far). Either narrow the query with namespace, label_selector or field_selector, or rewrite jq_expr to start with '.items[]' so it runs item by item with no size limit. For counts per namespace, node, image, etc. call kubernetes_count with e.g. '.items[] | .metadata.namespace' and read counts_by_value."
+          }
+          # managedFields and the last-applied annotation are large and almost never queried
+          SLIM='del(.metadata.managedFields, .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"])'
 
           while true; do
             QUERY="${API_PATH}?limit=${LIMIT}${SELECTOR_QUERY}"
@@ -588,57 +669,75 @@ toolsets:
               QUERY="${QUERY}&continue=$(uri_encode "$CONTINUE")"
             fi
 
-            OUTPUT=$(kubectl get --raw "$QUERY" 2>>"$err_file")
-            exit_code=$?
-
-            if [ $exit_code -ne 0 ]; then
+            PAGE_FILE="$WORK_DIR/page.json"
+            if ! kubectl get --raw "$QUERY" > "$PAGE_FILE" 2>>"$err_file"; then
               fail "kubectl get --raw failed for $QUERY."
             fi
 
-            ITEMS_COUNT=$(echo "$OUTPUT" | jq '.items | length')
-            TOTAL_PROCESSED=$((TOTAL_PROCESSED + ITEMS_COUNT))
+            ITEMS_COUNT=$(jq '.items | length' "$PAGE_FILE")
+            PROCESSED=$((PROCESSED + ITEMS_COUNT))
 
-            BATCH_MATCHES=$(echo "$OUTPUT" | jq -c -r {{ jq_expr }} 2>>"$err_file")
-            jq_exit=$?
-            if [ $jq_exit -ne 0 ]; then
-              fail "jq expression failed."
-            fi
-
-            if [ -n "$BATCH_MATCHES" ]; then
-              if [ -z "$ALL_MATCHES" ]; then
-                ALL_MATCHES="$BATCH_MATCHES"
-              else
-                ALL_MATCHES="$ALL_MATCHES"$'\n'"$BATCH_MATCHES"
+            if [ "$MODE" = "per_item" ]; then
+              if ! jq -c "(.items |= map(${SLIM})) | ${JQ_FILTER}" "$PAGE_FILE" >> "$MATCHES_FILE" 2>>"$err_file"; then
+                fail "jq expression failed."
+              fi
+            else
+              if [ "$LIST_HEADER" = '{}' ]; then
+                LIST_HEADER=$(jq -c '{kind, apiVersion, metadata: (.metadata | del(.continue, .remainingItemCount))}' "$PAGE_FILE")
+              fi
+              jq -c ".items[] | ${SLIM}" "$PAGE_FILE" >> "$ITEMS_FILE"
+              if [ "$(wc -c < "$ITEMS_FILE")" -gt "$MAX_MERGE_BYTES" ]; then
+                too_big_to_merge
               fi
             fi
 
-            CONTINUE=$(echo "$OUTPUT" | jq -r '.metadata.continue // empty')
+            CONTINUE=$(jq -r '.metadata.continue // empty' "$PAGE_FILE")
             if [ -z "$CONTINUE" ]; then
               break
             fi
           done
 
-          err_content=$(cat "$err_file" 2>/dev/null)
-          rm -f "$err_file"
-
-          # Count and preview the collected matches
-          filtered_matches=$(echo "$ALL_MATCHES" | grep -v '^$' | grep -v '^null$')
-          if [ -z "$filtered_matches" ]; then
-            MATCHES_FOUND=0
-            PREVIEW="[]"
-          else
-            MATCHES_FOUND=$(echo "$filtered_matches" | wc -l)
-            PREVIEW=$(echo "$filtered_matches" | head -n 10 | cut -c 1-200 | jq -R . | jq -s '.')
+          if [ "$MODE" = "whole_list" ]; then
+            touch "$ITEMS_FILE"
+            jq -c -n --argjson holmes_list_header "$LIST_HEADER" \
+              "\$holmes_list_header + {items: [inputs]} | ${JQ_FILTER}" "$ITEMS_FILE" > "$MATCHES_FILE" 2>>"$err_file"
+            jq_exit=$?
+            if [ $jq_exit -ne 0 ]; then
+              if grep -q "cannot allocate memory" "$err_file"; then
+                too_big_to_merge
+              fi
+              fail "jq expression failed."
+            fi
           fi
 
+          err_content=$(cat "$err_file" 2>/dev/null)
+
+          # Count and preview the matches; null and "" are not counted. When every match is a
+          # scalar and some repeat, also count each distinct value (top 50), e.g. per namespace.
+          # Streams the file so memory stays bounded by the number of distinct values.
           jq -n \
-            --argjson matches_found "$MATCHES_FOUND" \
-            --argjson preview "$PREVIEW" \
-            --argjson total_items_processed "$TOTAL_PROCESSED" \
+            --argjson total_items_processed "$PROCESSED" \
+            --arg mode "$MODE" \
             --arg stderr "$err_content" \
             --argjson scope "$SCOPE" \
             --argjson notes "$NOTES" \
-            '{total_items_processed: $total_items_processed, matches_found: $matches_found, preview: $preview, stderr: (if $stderr == "" then null else $stderr end), scope: $scope, notes: $notes}'
+            'reduce (inputs | select(. != null and . != "")) as $m
+               ({n: 0, preview: [], counts: {}, scalars: true};
+                .n += 1
+                | if (.preview | length) < 10 then .preview += [$m | if type == "string" then . else tojson end | .[0:200]] else . end
+                | if .scalars and ($m | type | IN("string", "number", "boolean")) then .counts[$m | tojson] += 1 else .scalars = false | .counts = {} end)
+             | {total_items_processed: $total_items_processed,
+                matches_found: .n,
+                mode: $mode,
+                preview: .preview,
+                counts_by_value: (if .scalars and (.counts | length) > 0 and (.counts | length) < .n
+                  then .counts | to_entries | sort_by(-.value) | .[:50] | map({value: (.key | fromjson), count: .value})
+                  else null end),
+                distinct_values: (if .scalars and .n > 0 then .counts | length else null end),
+                stderr: (if $stderr == "" then null else $stderr end),
+                scope: $scope,
+                notes: $notes}' \
+            "$MATCHES_FILE"
 
     # NOTE: this is only possible for probes with a healthz endpoint - we do this to avoid giving the LLM generic
     # http GET capabilities which are more powerful than we want to expose

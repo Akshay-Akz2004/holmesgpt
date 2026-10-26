@@ -119,6 +119,8 @@ def kube_stub(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
     class Stub:
+        dir = tmp_path
+
         def serve(self, path, body, page2=False):
             name = "raw" + path.replace("/", "_") + (".page2" if page2 else "")
             (tmp_path / f"{name}.json").write_text(json.dumps(body))
@@ -284,14 +286,15 @@ def test_selectors_are_kept_on_every_page(kube_stub, tool_name):
 
 
 @pytest.mark.parametrize("tool_name", PAGINATED_TOOLS)
-def test_null_selectors_behave_like_omitted(kube_stub, tool_name):
-    """Strict tool calls send null for unset optional params; it reaches the
-    script as the string 'None' and must not become a namespace or selector."""
+@pytest.mark.parametrize("value", [None, "null"])
+def test_null_selectors_behave_like_omitted(kube_stub, tool_name, value):
+    """Strict tool calls send null for unset optional params (rendered as 'None'),
+    and some models send the string "null"; neither may become a namespace or selector."""
     kube_stub.serve("/api/v1/pods", _list(_items("web-1")))
 
     result = _run(
         tool_name,
-        _params(tool_name, "pods", namespace=None, label_selector=None, field_selector=None),
+        _params(tool_name, "pods", namespace=value, label_selector=value, field_selector=value),
     )
 
     assert result["stderr"] is None
@@ -412,7 +415,7 @@ def test_tabular_query_keeps_namespace_for_grouped_namespaced_kind(kube_stub):
     assert result["notes"] == []
 
 
-@pytest.mark.parametrize("value", [None, ""])
+@pytest.mark.parametrize("value", [None, "", "null"])
 def test_tabular_query_without_selectors_lists_all_namespaces(kube_stub, value):
     kube_stub.tabular("NAME\nweb-1\nworker-1\n")
 
@@ -482,6 +485,173 @@ def test_tabular_query_returns_rows_larger_than_arg_limit(kube_stub):
 
     assert result["count"] == 1000
     assert len(result["rows"]) == 1000
+
+
+# --- whole-list expressions across pages (ROB-1721) --------------------------------
+
+
+@pytest.fixture
+def two_pages_of_configmaps(kube_stub):
+    """691 ConfigMaps over two API pages; team-b straddles the page boundary."""
+    items = [{"metadata": {"name": f"cm-{i}", "namespace": "team-a" if i < 300 else "team-b"}} for i in range(691)]
+    kube_stub.serve("/api/v1/configmaps", {"kind": "ConfigMapList", "apiVersion": "v1", "metadata": {"continue": "tok"}, "items": items[:500]})
+    kube_stub.serve("/api/v1/configmaps", {"kind": "ConfigMapList", "apiVersion": "v1", "metadata": {}, "items": items[500:]}, page2=True)
+    (kube_stub.dir / "api-resources.txt").write_text("configmaps   cm   v1   true   ConfigMap\n")
+    return kube_stub
+
+
+def test_jq_query_length_covers_all_pages(two_pages_of_configmaps):
+    result = _run("kubernetes_jq_query", _params("kubernetes_jq_query", "configmaps", jq_expr=".items | length"))
+
+    assert result["stderr"] is None
+    assert result["mode"] == "whole_list"
+    assert result["results"] == [691]
+    assert result["total_items_processed"] == 691
+
+
+def test_jq_query_group_by_is_not_split_at_page_boundary(two_pages_of_configmaps):
+    expr = ".items | group_by(.metadata.namespace) | map({ns: .[0].metadata.namespace, n: length})"
+
+    result = _run("kubernetes_jq_query", _params("kubernetes_jq_query", "configmaps", jq_expr=expr))
+
+    assert result["results"] == [[{"ns": "team-a", "n": 300}, {"ns": "team-b", "n": 391}]]
+
+
+def test_jq_query_whole_list_keeps_list_envelope(two_pages_of_configmaps):
+    result = _run(
+        "kubernetes_jq_query",
+        _params("kubernetes_jq_query", "configmaps", jq_expr="{kind, apiVersion, continue: .metadata.continue, n: (.items | length)}"),
+    )
+
+    assert result["results"] == [{"kind": "ConfigMapList", "apiVersion": "v1", "continue": None, "n": 691}]
+
+
+@pytest.mark.parametrize(
+    "expr, mode",
+    [
+        (".items[] | .metadata.name", "per_item"),
+        ("  .items[]? | select(.x)", "per_item"),
+        ("[.items[] | .metadata.name] | length", "whole_list"),
+        (".items[] | .metadata.name, (.items | length)", "whole_list"),
+        (".items[0]", "whole_list"),
+        ("reduce .items[] as $i (0; . + 1)", "whole_list"),
+    ],
+)
+def test_mode_follows_expression_shape(two_pages_of_configmaps, expr, mode):
+    result = _run("kubernetes_jq_query", _params("kubernetes_jq_query", "configmaps", jq_expr=expr))
+
+    assert result["stderr"] is None
+    assert result["mode"] == mode
+
+
+def test_whole_list_and_per_item_expressions_agree(two_pages_of_configmaps):
+    per_item = _run("kubernetes_jq_query", _params("kubernetes_jq_query", "configmaps", jq_expr=".items[] | .metadata.name"))
+    whole = _run("kubernetes_jq_query", _params("kubernetes_jq_query", "configmaps", jq_expr="[.items[] | .metadata.name]"))
+
+    assert whole["results"] == [per_item["results"]]
+
+
+@pytest.mark.parametrize("expr", [".", ".items", " . "])
+def test_count_of_list_object_counts_its_items(two_pages_of_configmaps, expr):
+    result = _run("kubernetes_count", _params("kubernetes_count", "configmaps", jq_expr=expr))
+
+    assert result["matches_found"] == 691
+    assert result["mode"] == "per_item"
+    assert result["notes"] == [
+        f"jq_expr '{expr}' would count the list object itself, so '.items[]' was used to count the items."
+    ]
+
+
+def test_count_reports_counts_by_value(two_pages_of_configmaps):
+    result = _run("kubernetes_count", _params("kubernetes_count", "configmaps", jq_expr=".items[] | .metadata.namespace"))
+
+    assert result["matches_found"] == 691
+    assert result["counts_by_value"] == [{"value": "team-b", "count": 391}, {"value": "team-a", "count": 300}]
+    assert result["distinct_values"] == 2
+    assert result["preview"][0] == "team-a"
+
+
+def test_count_omits_counts_by_value_when_all_values_differ(two_pages_of_configmaps):
+    result = _run("kubernetes_count", _params("kubernetes_count", "configmaps", jq_expr=".items[] | .metadata.name"))
+
+    assert result["matches_found"] == 691
+    assert result["counts_by_value"] is None
+    assert result["distinct_values"] == 691
+    assert result["preview"][:2] == ["cm-0", "cm-1"]
+
+
+def test_count_omits_counts_by_value_for_objects(two_pages_of_configmaps):
+    result = _run("kubernetes_count", _params("kubernetes_count", "configmaps", jq_expr=".items[] | .metadata"))
+
+    assert result["matches_found"] == 691
+    assert result["counts_by_value"] is None
+    assert result["distinct_values"] is None
+    assert json.loads(result["preview"][0]) == {"name": "cm-0", "namespace": "team-a"}
+
+
+def test_count_keeps_typed_values_and_skips_null_and_empty(kube_stub):
+    kube_stub.serve("/api/v1/pods", _list([{"spec": {"r": r}} for r in [3, 3, "3", None, "", True]]))
+
+    result = _run("kubernetes_count", _params("kubernetes_count", "pods", jq_expr=".items[] | .spec.r"))
+
+    assert result["matches_found"] == 4
+    assert result["counts_by_value"] == [{"value": 3, "count": 2}, {"value": "3", "count": 1}, {"value": True, "count": 1}]
+
+
+@pytest.mark.parametrize("tool_name", PAGINATED_TOOLS)
+def test_managed_fields_and_last_applied_are_removed(kube_stub, tool_name):
+    item = {
+        "metadata": {
+            "name": "web-1",
+            "managedFields": [{"manager": "kubectl"}],
+            "annotations": {"kubectl.kubernetes.io/last-applied-configuration": "{}", "team": "a"},
+        }
+    }
+    kube_stub.serve("/api/v1/pods", _list([item]))
+
+    for expr in [".items[] | .metadata", "[.items[] | .metadata] | .[0]"]:
+        result = _run(tool_name, _params(tool_name, "pods", jq_expr=expr))
+        metadata = result["results"][0] if tool_name == "kubernetes_jq_query" else json.loads(result["preview"][0])
+        assert metadata == {"name": "web-1", "annotations": {"team": "a"}}, expr
+
+
+# --- memory cap for whole-list expressions ------------------------------------------
+
+# ulimit -v of ~117MB caps the merged list at ~9.7MB; two pages of 6MB cross it on page 2
+SMALL_ULIMIT_KB = 120_000
+
+
+@pytest.fixture
+def large_pod_list(kube_stub, monkeypatch):
+    monkeypatch.setattr("holmes.core.tools.get_ulimit_prefix", lambda: f"ulimit -v {SMALL_ULIMIT_KB}; ")
+    blob = "x" * 12_000
+    page1 = [{"metadata": {"name": f"p-{i}", "namespace": "team-a"}, "data": blob} for i in range(500)]
+    page2 = [{"metadata": {"name": f"p-{i}", "namespace": "team-b"}, "data": blob} for i in range(500, 1000)]
+    kube_stub.serve("/api/v1/pods", _list(page1, cont="tok"))
+    kube_stub.serve("/api/v1/pods", _list(page2), page2=True)
+    return kube_stub
+
+
+@pytest.mark.parametrize("tool_name", PAGINATED_TOOLS)
+def test_whole_list_over_memory_cap_returns_actionable_error(large_pod_list, tool_name):
+    result = _run(tool_name, _params(tool_name, "pods", jq_expr=".items | length"))
+
+    assert result["matches_found"] == 0
+    stderr = result["stderr"]
+    assert "jq_expr does not start with '.items[]', so it needs all pods in memory at once" in stderr
+    assert "larger than the 9 MB this tool can hold (1000 items read so far)" in stderr
+    assert "namespace, label_selector or field_selector" in stderr
+    assert "counts_by_value" in stderr
+
+
+@pytest.mark.parametrize("tool_name", PAGINATED_TOOLS)
+def test_per_item_expression_has_no_memory_cap(large_pod_list, tool_name):
+    result = _run(tool_name, _params(tool_name, "pods", jq_expr=".items[] | .metadata.namespace"))
+
+    assert result["stderr"] is None
+    assert result["matches_found"] == 1000
+    if tool_name == "kubernetes_count":
+        assert result["counts_by_value"] == [{"value": "team-a", "count": 500}, {"value": "team-b", "count": 500}]
 
 
 # --- tool schema -----------------------------------------------------------------
